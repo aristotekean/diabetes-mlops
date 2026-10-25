@@ -2,7 +2,7 @@
 # to read the training database, train the model and register it in MLflow.
 #
 # Build context is the repository root, so the shared ml/diabetes_model package
-# can be installed here once it exists:
+# is installed into the image:
 #   docker compose build airflow-scheduler
 #   docker build -f apps/airflow/Dockerfile -t diabetes-airflow .
 
@@ -15,7 +15,11 @@ USER root
 COPY apps/airflow/requirements.txt /tmp/requirements.txt
 COPY ml/diabetes_model /tmp/diabetes-model
 COPY scripts /opt/airflow/scripts
-RUN chown -R airflow:root /tmp/diabetes-model /tmp/requirements.txt /opt/airflow/scripts
+# DAGs are baked in so a Kubernetes deployment needs no bind mount; the local
+# compose still mounts apps/airflow/dags over this copy for fast iteration.
+COPY apps/airflow/dags /opt/airflow/dags
+RUN chown -R airflow:root /tmp/diabetes-model /tmp/requirements.txt \
+    /opt/airflow/scripts /opt/airflow/dags
 
 USER airflow
 
