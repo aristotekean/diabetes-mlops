@@ -1,145 +1,193 @@
 # Data contract
 
 This contract defines the PostgreSQL boundaries between dataset ingestion,
-training, and inference. The initial source is the Diabetes 130-US hospitals
-CSV linked by the workshop. Its observed header has 50 columns; `encounter_id`
-is unique in the downloaded 101,766-row file, while `patient_nbr` is not.
+training, and inference. The source is the Diabetes 130-US hospitals CSV
+linked by the workshop: 101,766 rows and 50 columns. `encounter_id` is unique
+in the file; `patient_nbr` is not (71,518 patients).
 
-## PostgreSQL schemas
+The analysis behind every decision below is in
+[`notebooks/01_eda.ipynb`](../notebooks/01_eda.ipynb). The rules are implemented
+once, in the shared package [`ml/diabetes_model`](../ml/diabetes_model), and
+reused by the Airflow DAG and, later, the inference API.
 
-The migration
-[`001_create_data_contract.sql`](../infra/database/migrations/001_create_data_contract.sql)
-creates three schemas in the training PostgreSQL database:
+## Modeling decisions
 
-- `raw`: source batches and the original CSV records.
-- `clean`: versioned, model-ready features, target, and data split.
+- **Target:** `readmitted`, three classes: `NO`, `>30` (readmitted after 30
+  days), `<30` (readmitted within 30 days). The prediction is made at
+  discharge.
+- **Primary selection metric:** validation **macro-F1**. Classes are
+  imbalanced (`NO` 53.9%, `>30` 34.9%, `<30` 11.2%), so accuracy rewards
+  ignoring the minority classes; macro-F1 weights the three classes equally.
+  Per-class recall (especially `<30`), per-class F1, macro precision/recall,
+  balanced accuracy, ROC-AUC one-vs-rest, and log loss are logged as
+  supporting metrics. Every candidate uses balanced class weights.
+- **Production alias:** `production` on the registered model `diabetes`.
+
+## PostgreSQL schemas and migrations
+
+The migrations in [`infra/database/migrations`](../infra/database/migrations)
+create three schemas in the training database:
+
+- `raw`: source batches and the original CSV records, with their validation
+  status.
+- `clean`: versioned, model-ready features, label, exclusion reason, and split.
 - `inference`: one auditable event per inference request.
 
-Apply it with a PostgreSQL client that can reach the training database:
+[`infra/database/migrate.sh`](../infra/database/migrate.sh) applies pending
+files in name order, each in its own transaction, and records them in
+`public.schema_migrations`. Docker Compose runs it as the one-shot
+`train-db-migrate` service before Airflow starts; it uses the standard libpq
+variables (`PGHOST`, `PGDATABASE`, `PGUSER`, `PGPASSWORD`), so the same script
+can run as a Kubernetes Job. Every migration is also written to be safe to
+re-run. Credentials come from the deployment environment or a Kubernetes
+Secret and must not be committed.
 
-```bash
-psql "$TRAIN_DATABASE_URL" \
-  -v ON_ERROR_STOP=1 \
-  -f infra/database/migrations/001_create_data_contract.sql
-```
+## RAW layer
 
-`TRAIN_DATABASE_URL` must come from the deployment environment or a Kubernetes
-Secret; credentials must not be committed to the repository. This migration is
-safe to re-run and does not delete existing data.
+Each DAG run loads **one** batch of at most 15,000 rows: the first batch of the
+current source snapshot that is not `completed`. The seven batches of the
+workshop file therefore arrive over seven runs, simulating incremental data.
 
-## Source file and RAW ingestion
+`raw.load_batches` (one row per batch):
 
-The source is a UTF-8 CSV. The download currently produces 101,766 rows and
-these 50 columns:
+- `batch_id`: deterministic UUIDv5 of the file checksum and batch number.
+- `source_file`, `source_uri`, `source_sha256`: origin of the data. A changed
+  file checksum is a new source snapshot.
+- `batch_number`, `expected_record_count`, `loaded_record_count`.
+- `status` (`pending`, `loading`, `completed`, `failed`), `started_at`,
+  `completed_at`, `error_message`, and `dag_run_id`.
 
-```text
-encounter_id, patient_nbr, race, gender, age, weight, admission_type_id,
-discharge_disposition_id, admission_source_id, time_in_hospital, payer_code,
-medical_specialty, num_lab_procedures, num_procedures, num_medications,
-number_outpatient, number_emergency, number_inpatient, diag_1, diag_2, diag_3,
-number_diagnoses, max_glu_serum, A1Cresult, metformin, repaglinide,
-nateglinide, chlorpropamide, glimepiride, acetohexamide, glipizide,
-glyburide, tolbutamide, pioglitazone, rosiglitazone, acarbose, miglitol,
-troglitazone, tolazamide, examide, citoglipton, insulin,
-glyburide-metformin, glipizide-metformin, glimepiride-pioglitazone,
-metformin-rosiglitazone, metformin-pioglitazone, change, diabetesMed,
-readmitted
-```
+`raw.records` (one row per CSV data row):
 
-`encounter_id` is the encounter key in the source, and `readmitted` is the
-three-class target (`NO`, `>30`, `<30`). `patient_nbr` identifies repeated
-patients and is not an encounter key. Raw CSV values are retained as strings
-inside `raw.records.record_data`; tokens such as `?` and `None` are not
-silently converted in RAW.
+- `raw_record_id`: surrogate key used as CLEAN lineage.
+- `batch_id`, `source_sha256`, `source_row_number` (one-based data row), and
+  `source_record_sha256` (row hash).
+- `encounter_id` and `record_data`: the complete, unmodified row as strings.
+- `status`: `loaded` on insert, then `validated` or `rejected` by the quality
+  task; `status_reason` lists the violated rules; `validated_at`.
 
-Each ingestion creates a row in `raw.load_batches` with:
+Idempotency: `(source_sha256, source_row_number)` is unique. A batch commits
+its `loading` state, then inserts its records and marks itself `completed` in a
+single transaction; on failure the records roll back and the batch is set to
+`failed` in a separate transaction. The next run resumes that batch before
+loading a new one.
 
-- `batch_id`: UUID used to associate inserted records with the load.
-- `source_file` and `source_uri`: original file name and configured source.
-- `source_sha256`: SHA-256 of the complete downloaded file.
-- `batch_number`: one-based, stable chunk number for that file checksum.
-- `expected_record_count` and `loaded_record_count`: batch counts; a batch may
-  contain at most 15,000 records.
-- `status`, `started_at`, `completed_at`, and `error_message`: execution state.
+### RAW quality rules
 
-Each CSV data record becomes a row in `raw.records`. `source_row_number` is the
-one-based CSV data row number (the header is not a record);
-`source_record_sha256` hashes that row's canonical source representation; and
-`record_data` contains the complete, unmodified row keyed by the CSV header.
-`encounter_id` is also copied to its own text column for lookup.
+`validate_source_record` checks every `loaded` record: all 50 columns present;
+`encounter_id` and `patient_nbr` are digits; `readmitted` is a known class; the
+eight numeric fields are non-negative integers and `time_in_hospital` is 1-14;
+the three admission/discharge codes are digits; `age`, `gender`, lab results,
+medications, `change`, and `diabetesMed` belong to their known domains. An
+encounter already validated earlier is rejected as `duplicate_encounter_id`.
+The DAG fails when any batch has more than 1% rejected rows
+(`RAW_MAX_REJECTED_FRACTION`); because statuses persist, the gate keeps
+failing until the data is investigated. The workshop file has no rejections.
 
-The idempotency key is `(source_sha256, source_row_number)`, not the batch UUID.
-The ingestor must create or resume the batch and commit its `loading` state,
-then insert that batch's records and set it `completed` in one transaction. A
-retry must reuse the same file checksum and batch number, insert with conflict
-detection, verify the inserted/existing count, and only then mark the batch
-`completed`. On failure, roll back the record transaction and set the batch to
-`failed` in a separate transaction. Do not mark a partially committed batch
-complete. A changed source file checksum is a new source snapshot and must be
-tracked as such.
+## CLEAN layer (`readmission-features-v2`)
 
-## CLEAN training records
+Validated RAW records not yet in CLEAN for the current transformation version
+are transformed in chunks of at most 15,000 into `clean.records_staging`, then
+merged atomically into `clean.records` and removed from staging.
 
-Each successfully validated raw record can produce a row in
-`clean.records`. The first transformation is `readmission-features-v1` and uses
-the following 43 model input columns:
+`clean.records`:
 
-```text
-race, gender, age, admission_type_id, admission_source_id, time_in_hospital,
-payer_code, medical_specialty, num_lab_procedures, num_procedures,
-num_medications, number_outpatient, number_emergency, number_inpatient,
-diag_1, diag_2, diag_3, number_diagnoses, max_glu_serum, A1Cresult, metformin,
-repaglinide, nateglinide, chlorpropamide, glimepiride, acetohexamide,
-glipizide, glyburide, tolbutamide, pioglitazone, rosiglitazone, acarbose,
-miglitol, troglitazone, tolazamide, insulin, glyburide-metformin,
-glipizide-metformin, glimepiride-pioglitazone, metformin-rosiglitazone,
-metformin-pioglitazone, change, diabetesMed
-```
+- `raw_record_id` (lineage) and `transformation_version`; the pair is unique,
+  so reprocessing is idempotent and a future version can coexist.
+- `features`: JSON object with the 37 model features below.
+- `target_readmitted`: `NO`, `>30`, or `<30`.
+- `exclusion_reason`: set for encounters that cannot be used for training;
+  such rows never get a split.
+- `data_split`: `train`, `validation`, or `test`, assigned by the split task.
+- `processed_at`.
 
-The eight numeric features are `time_in_hospital`, `num_lab_procedures`,
-`num_procedures`, `num_medications`, `number_outpatient`, `number_emergency`,
-`number_inpatient`, and `number_diagnoses`. Other listed features are
-categorical strings, including numeric-looking source codes. Null tokens
-`?`, `None`, and empty strings become null values in CLEAN. `weight` is omitted
-because 96.86% of its values are missing in the downloaded dataset.
-`examide` and `citoglipton` are omitted because each has only the value `No`.
-`discharge_disposition_id` is omitted because disposition is determined after
-the encounter and would leak future information into a readmission prediction.
-`encounter_id` and `patient_nbr` are retained only as lineage/split metadata,
-not as model features.
+### Excluded encounters
 
-During model fitting, the shared pipeline imputes numeric nulls using the
-training-partition median and scales numeric features. It imputes categorical
-nulls with `__missing__` and one-hot encodes categories; unseen inference
-categories are ignored by the encoder. These fitted transformations are part
-of the model pipeline, so inference must use that complete pipeline.
+Discharge dispositions 11, 19, 20, 21 (expired) and 13, 14 (hospice) are kept
+in CLEAN with `exclusion_reason = 'discharged_expired_or_hospice'` and are not
+used for training: a readmission cannot be observed, and every expired
+encounter is labelled `NO`. This removes 2,423 encounters (99,343 remain).
 
-- `raw_record_id`: lineage back to the source record.
-- `transformation_version`: `readmission-features-v1` for the rules above.
-- `features`: JSON object containing only model input features after cleaning
-  and feature engineering.
-- `target_readmitted`: source label, restricted to `NO`, `>30`, or `<30`.
-- `data_split`: `train`, `validation`, or `test`.
-- `processed_at`: processing timestamp.
+### Inputs and features
 
-The unique key `(raw_record_id, transformation_version)` makes processing
-idempotent while allowing a new transformation version to coexist with the
-previous one. CLEAN must not contain `encounter_id` or `patient_nbr` inside the
-model features. The shared `build_clean_records` function yields batches of at
-most 15,000 rows and emits `encounter_id` as temporary lineage metadata; the
-Airflow/database writer must resolve that encounter to
-`raw.records.raw_record_id` and insert the foreign key, without placing the
-encounter ID in `features`. Splitting groups records by patient so one
-patient's encounters cannot leak across train, validation, and test.
+The **input contract** has 44 fields: the 50 source columns minus
+`encounter_id`, `patient_nbr`, `readmitted`, `weight` (96.9% missing), and
+`examide` / `citoglipton` (constant). Missing tokens `?` and empty strings
+become null. `None` in `max_glu_serum` and `A1Cresult` means "test not
+performed" and stays as its own category.
+
+`engineer_features` turns those inputs into **37 model features**:
+
+| Feature | Rule |
+|---|---|
+| 8 numeric inputs | `time_in_hospital`, `num_lab_procedures`, `num_procedures`, `num_medications`, `number_outpatient`, `number_emergency`, `number_inpatient`, `number_diagnoses` |
+| `age_years` | midpoint of the age bucket (5 … 95) |
+| `total_visits` | outpatient + emergency + inpatient visits in the previous year |
+| `num_active_medications` | medications (of 21) not equal to `No` |
+| `num_medication_changes` | medications with dosage `Up` or `Down` |
+| `race`, `payer_code` | unchanged categories |
+| `gender` | `Unknown/Invalid` becomes null |
+| `medical_specialty_group` | 72 specialties grouped (internal medicine, emergency, family practice, cardiology, surgery, orthopedics, radiology, …, other) |
+| `admission_type` | emergency, urgent, elective, other, unknown |
+| `admission_source` | referral, emergency_room, transfer, other, unknown |
+| `discharge_group` | home, home_health, facility_transfer, left_against_advice, other, unknown |
+| `diag_1_group`, `diag_2_group`, `diag_3_group` | ICD-9 chapter (Strack et al., 2014): circulatory, respiratory, digestive, diabetes (250.xx), injury, musculoskeletal, genitourinary, neoplasms, other |
+| `max_glu_serum`, `A1Cresult` | categories, null becomes `None` (not measured) |
+| 11 medications | `metformin`, `repaglinide`, `nateglinide`, `glimepiride`, `glipizide`, `glyburide`, `pioglitazone`, `rosiglitazone`, `acarbose`, `insulin`, `glyburide-metformin` |
+| `change`, `diabetesMed` | categories |
+
+The other 10 medications are used by fewer than 0.1% of encounters and only
+feed the two medication counts. Fitted transformations happen inside the model
+pipeline, using the training partition only: numeric median imputation (plus
+standard scaling for logistic regression), categorical nulls as
+`__missing__`, and one-hot encoding (ordinal encoding with native categorical
+support for gradient boosting). Unseen categories are ignored.
+
+### Splits
+
+`assign_split` hashes `patient_nbr` (SHA-256 with the salt
+`diabetes-patient-split-v1`): 70% train, 15% validation, 15% test. The split
+depends only on the patient, so all encounters of a patient share a partition
+and earlier assignments never change when new batches arrive. The split task
+fails if any patient spans two partitions. On the full file the partitions hold
+69,586 / 14,986 / 14,771 rows with near-identical class distributions.
+
+## Training, registration, and promotion
+
+Every run with new CLEAN data trains three candidates on all accumulated
+training rows: class-balanced logistic regression, histogram gradient
+boosting, and random forest. Each candidate is a nested MLflow run under a
+parent run named `training-<dag_run_id>` and logs parameters, train /
+validation / test metrics, fit time, normalized confusion matrices,
+classification reports, the CLEAN snapshot, and the model.
+
+The logged model is the **serving pipeline**: the stateless `FeatureEngineer`
+step followed by the fitted preprocessing and classifier. It accepts the 44
+input fields, has an explicit signature (numeric fields `double`, the rest
+`string`), bundles the `diabetes_model` package through `code_paths`, and is
+serialized with skops, trusting only sklearn, numpy, scipy, and
+`diabetes_model` types.
+
+The candidate with the best validation macro-F1 is registered as a new version
+of `diabetes`, tagged with its CLEAN snapshot fingerprint so a retry or a run
+without new data never registers the same data twice. The registered version
+and the current `production` version are then loaded from the registry and
+scored on the same validation rows, rebuilt from RAW exactly as the API will
+send them. The new version must reproduce its training-time score (a
+training/serving skew check), and it takes the `production` alias only if its
+macro-F1 is higher than the champion's (`PROMOTION_MIN_IMPROVEMENT`, default
+0). The test partition is reported, never used to select.
+
+When a run brings no new CLEAN data, `check_training_needed` skips the training
+branch.
 
 ## Inference API and INFERENCE LOGS
 
-The API accepts one observation as JSON. `features` contains exactly the 43
-model input columns listed above: numeric fields are JSON numbers or `null`;
-categorical fields are strings or `null`. `encounter_id`, `patient_nbr`,
-`readmitted`, and the excluded fields are never accepted as features. The API
-must validate names and types against the logged MLflow model signature; that
-signature is authoritative, so the API does not hard-code a model version.
+The API accepts one observation as JSON. `features` contains the 44 input
+fields: the eight numeric fields are JSON numbers or `null`; the other fields
+are strings or `null`, including numeric-looking codes. Identifiers, the target,
+and the excluded columns are never accepted. The API loads
+`models:/diabetes@production`, whose signature is authoritative.
 
 Request:
 
@@ -151,6 +199,7 @@ Request:
     "gender": "Male",
     "age": "[70-80)",
     "admission_type_id": "1",
+    "discharge_disposition_id": "1",
     "admission_source_id": "7",
     "time_in_hospital": 6,
     "payer_code": null,
@@ -165,8 +214,8 @@ Request:
     "diag_2": "530",
     "diag_3": "787",
     "number_diagnoses": 9,
-    "max_glu_serum": null,
-    "A1Cresult": null,
+    "max_glu_serum": "None",
+    "A1Cresult": "None",
     "metformin": "No",
     "repaglinide": "No",
     "nateglinide": "No",
@@ -220,57 +269,4 @@ including failed requests. `input_data` is the exact submitted feature object;
 `prediction`, `probabilities`, model identity, and duration are populated on
 success. `status`, `error_code`, and `error_message` describe failures. The
 `request_id` is the idempotency and audit key and must be returned to the
-caller. Do not store patient identifiers or other unnecessary identifying
-information in inference inputs.
-
-## Contract dependencies to settle during implementation
-
-The shared training implementation is in
-[`ml/diabetes_model`](../ml/diabetes_model). Its training input uses the 43
-columns above, with eight numeric and 35 categorical features. The complete
-preprocessing-plus-classifier pipeline should be logged to MLflow with a model
-signature; API request validation and frontend fields must be checked against
-that signature when the serving integration is implemented.
-
-The Airflow DAG in
-[`apps/airflow/dags/diabetes_training.py`](../apps/airflow/dags/diabetes_training.py)
-implements the source validation, RAW batches, quality gate, CLEAN upserts,
-training, model comparison, and production alias promotion. It expects the
-PostgreSQL migration to be applied before the first run. The source file must be
-available at `DIABETES_DATASET_PATH`; the development Compose mounts
-`data/Diabetes`, while server/Kubernetes deployments must mount an equivalent
-writable persistent volume and permit HTTPS egress to the source when the file
-is absent. The task downloads the source into this mount if necessary.
-`TRAIN_DB_*` (or `TRAIN_DATABASE_URL`) and `MLFLOW_TRACKING_URI` must be
-supplied by the deployment.
-Runs are scheduled weekly, do not backfill, and only one DAG run is active at a
-time; individual tasks retry twice. RAW batches use deterministic UUIDv5 IDs
-derived from the source checksum and batch number, while record uniqueness uses
-checksum plus original data-row number. Each batch is committed atomically.
-CLEAN is upserted by raw-record ID and transformation version in batches of at
-most 15,000. A failed CLEAN batch rolls back without corrupting earlier
-completed batches and can safely be retried.
-MLflow runs carry an idempotency tag derived from the Airflow run ID, source
-checksum, and transformation version. A retry reuses an already registered
-model for that job rather than creating another version.
-
-The fixed split seed is 42. The implementation searches deterministic
-`GroupShuffleSplit` candidates to assign approximately 70% of rows to train,
-15% to validation, and 15% to test, keeping every `patient_nbr` in exactly one
-partition while preferring class distributions close to the full dataset.
-Training fails if any partition lacks one of the three target classes or if
-patients overlap across partitions. The classifier is class-balanced logistic
-regression. Validation macro-F1 is the primary selection metric because it
-gives equal weight to early, later, and no readmission despite the unequal
-class frequencies. Per-class recall, macro-precision, macro-recall, and
-balanced accuracy are also reported. Per-class recall metric names use the
-MLflow-safe tokens `no_readmission`, `readmitted_after_30_days`, and
-`readmitted_within_30_days`, corresponding to source labels `NO`, `>30`, and
-`<30`. The test partition is evaluated separately and is not used to fit the
-model.
-The baseline logistic regression uses `C=0.1`, `tol=0.001`, and
-`max_iter=1000`; this configuration converged on the full downloaded dataset.
-On the checked-in workshop CSV, the baseline produced validation macro-F1
-`0.4254` and test macro-F1 `0.4311`. These are reproducibility reference
-metrics, not a claim of production readiness; future model candidates should
-be compared against them using validation metrics before test evaluation.
+caller. Do not store patient identifiers in inference inputs.

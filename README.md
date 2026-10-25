@@ -21,6 +21,8 @@ Flujo principal: Airflow toma los datos de entrenamiento desde PostgreSQL, entre
 ```
 apps/            servicios propios: api-inference (FastAPI), frontend (Streamlit), airflow (DAGs)
 ml/              paquete python compartido con la lógica del modelo
+notebooks/       análisis exploratorio que justifica el procesamiento
+infra/database/  migraciones SQL de las capas RAW, CLEAN e INFERENCE
 infra/k8s/       manifiestos kustomize por servicio
 infra/monitoring observabilidad con Prometheus y Grafana (Server C)
 infra/load-testing  pruebas de carga con Locust (Server B)
@@ -48,41 +50,84 @@ el contrato de entrada/salida de inferencia están documentados en
 está en
 [infra/database/migrations/001_create_data_contract.sql](infra/database/migrations/001_create_data_contract.sql).
 
-## Procesamiento y entrenamiento
+## Análisis y procesamiento
 
-El paquete compartido `ml/diabetes_model` valida y prepara el CSV, excluye
-identificadores y variables posteriores al desenlace, separa por paciente y
-entrena un pipeline reproducible. Para ejecutarlo localmente, instala el
-paquete y sus dependencias; luego ejecuta:
+[notebooks/01_eda.ipynb](notebooks/01_eda.ipynb) contiene el análisis
+exploratorio que justifica la limpieza, la ingeniería de características
+(`readmission-features-v2`), la partición por paciente y la métrica de
+selección. Para ejecutarlo localmente:
 
 ```bash
-python3 -m pip install -e ./ml/diabetes_model
-python3 -m diabetes_model data/Diabetes/Diabetes.csv
+python3 -m venv .venv
+.venv/bin/pip install -e ./ml/diabetes_model jupyter matplotlib
+.venv/bin/jupyter lab notebooks/01_eda.ipynb
 ```
 
-El pipeline reporta macro-F1 de validación como métrica primaria, además de
-métricas por clase y evaluación final en test. La imagen de Airflow también
-instala el mismo paquete compartido para que los DAGs lo reutilicen en el
-clúster; no se debe mantener una implementación distinta del preprocesamiento
-en Airflow.
+El paquete compartido `ml/diabetes_model` implementa esas reglas una sola vez y
+lo reutilizan el DAG y la API:
+
+- `contract.py`: esquema de la fuente, validación por registro, exclusión de
+  fallecidos/hospicio y el contrato de 44 campos de entrada.
+- `features.py`: 37 variables del modelo (diagnósticos ICD-9 agrupados,
+  especialidad, edad ordinal, conteos de visitas y medicamentos, …).
+- `splits.py`: partición 70/15/15 por hash de paciente, estable entre lotes.
+- `models.py`: candidatos (regresión logística, gradient boosting, random
+  forest), métricas y el pipeline que se sirve.
+
+Para entrenar los candidatos sobre el CSV completo y ejecutar las pruebas:
+
+```bash
+.venv/bin/pip install -e ./ml/diabetes_model pytest
+.venv/bin/python -m diabetes_model data/Diabetes/Diabetes.csv
+.venv/bin/python -m pytest ml/diabetes_model/tests
+```
+
+La métrica principal es el **macro-F1 de validación**: las clases están
+desbalanceadas (`<30` es el 11%) y el macro-F1 pondera por igual las tres. Con
+el dataset completo el mejor candidato es gradient boosting (macro-F1 de
+validación 0,441, test 0,441), frente a 0,425 de la regresión logística v1.
 
 ## DAG de entrenamiento
 
-El DAG `diabetes_incremental_training` valida el CSV, carga RAW en lotes de
-hasta 15.000 filas, valida RAW, genera CLEAN por lotes, entrena y registra
-candidatos en MLflow, compara macro-F1 de validación contra el alias productivo
-y solo lo mueve si mejora. El DAG usa `@weekly`, desactiva catchup, limita a una
-ejecución activa y reintenta las tareas fallidas dos veces. Los IDs de lote se
-derivan del checksum y número de lote; el checksum/posición de fila y
-`raw_record_id`/versión de transformación hacen idempotentes RAW y CLEAN.
+El DAG `diabetes_incremental_training` simula la llegada incremental de datos:
+**cada ejecución carga un lote nuevo** (máximo 15.000 filas) y reentrena con
+todo lo acumulado. Tareas:
 
-La tarea inicial descarga el CSV del taller al volumen persistente cuando el
-archivo todavía no existe; luego valida esquema, claves y etiquetas. En Compose
-se monta `data/Diabetes` en Airflow. En Kubernetes/servidor remoto, monta un
-volumen persistente escribible en `DIABETES_DATASET_PATH` y permite salida HTTPS
-a Google Drive. El CSV no se incluye en la imagen ni en Git. La conexión
-PostgreSQL se configura con `TRAIN_DB_*` o `TRAIN_DATABASE_URL`, y MLflow con
-`MLFLOW_TRACKING_URI`. Aplica antes la migración PostgreSQL descrita en
-[docs/data-contract.md](docs/data-contract.md). La primera ejecución puede
-promover el primer modelo al alias `production`; las siguientes solo lo
-reemplazan si superan su macro-F1 de validación sobre el mismo snapshot y split.
+1. `validate_source_file`: descarga el CSV si falta y valida esquema y forma.
+2. `ingest_next_batch`: carga a `raw.records` el siguiente lote pendiente.
+3. `validate_raw_quality`: marca cada fila `validated`/`rejected` con su motivo;
+   falla si un lote supera 1% de rechazos.
+4. `preprocess_raw_to_clean`: lee RAW (no el CSV), aplica la transformación y
+   deja el resultado en `clean.records_staging`.
+5. `store_clean_records`: fusiona staging en `clean.records` de forma atómica.
+6. `split_dataset`: asigna train/validation/test por paciente y verifica que
+   no haya fuga entre particiones.
+7. `check_training_needed`: omite el entrenamiento si no hay datos nuevos.
+8. `train_candidates`: entrena los 3 candidatos como runs anidados de MLflow
+   (parámetros, métricas, matrices de confusión, reportes y modelo).
+9. `register_best_model`: registra el mejor por macro-F1 de validación.
+10. `compare_with_champion`: evalúa la nueva versión y la versión productiva
+    sobre la misma validación, cargándolas desde el registro.
+11. `promote_model`: mueve el alias `production` solo si la nueva versión es
+    mejor.
+
+Por defecto se ejecuta cada 10 minutos (`DIABETES_TRAINING_SCHEDULE`), sin
+catchup y con una sola ejecución activa; las tareas se reintentan dos veces.
+Es reejecutable: los lotes tienen IDs deterministas, RAW es único por
+checksum y fila, CLEAN por registro y versión de transformación, y cada
+versión registrada lleva la huella del snapshot de CLEAN con el que se
+entrenó. Una vez cargados los 7 lotes, las ejecuciones siguientes no
+entrenan.
+
+Compose aplica las migraciones de `infra/database/migrations` con el servicio
+`train-db-migrate` antes de iniciar Airflow. La conexión a PostgreSQL se
+configura con `TRAIN_DB_*` o `TRAIN_DATABASE_URL`, y MLflow con
+`MLFLOW_TRACKING_URI`. En Kubernetes, monta un volumen persistente escribible
+en `DIABETES_DATASET_PATH` y permite salida HTTPS a Google Drive. El detalle de
+tablas, reglas y contrato de inferencia está en
+[docs/data-contract.md](docs/data-contract.md).
+
+Si ya habías ejecutado la versión anterior del DAG, los datos en
+`postgres-train` y el modelo `diabetes` corresponden a la carga completa v1.
+Para repetir la carga incremental desde cero, elimina los volúmenes de datos:
+`docker compose down && docker volume rm diabetes_postgres_train diabetes_mlflow_db diabetes_minio`.
