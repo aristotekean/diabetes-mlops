@@ -10,10 +10,18 @@ ARG AIRFLOW_VERSION=3.3.2
 FROM apache/airflow:${AIRFLOW_VERSION}
 ARG AIRFLOW_VERSION
 
+USER root
+
 COPY apps/airflow/requirements.txt /tmp/requirements.txt
+COPY ml/diabetes_model /tmp/diabetes-model
+COPY scripts /opt/airflow/scripts
+RUN chown -R airflow:root /tmp/diabetes-model /tmp/requirements.txt /opt/airflow/scripts
+
+USER airflow
 
 # Re-stating apache-airflow pins its version so pip cannot upgrade or
 # downgrade it while resolving the DAG dependencies.
 RUN pip install --no-cache-dir \
     "apache-airflow==${AIRFLOW_VERSION}" \
-    -r /tmp/requirements.txt
+    -r /tmp/requirements.txt \
+    /tmp/diabetes-model
