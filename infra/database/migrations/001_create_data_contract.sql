@@ -1,5 +1,3 @@
-BEGIN;
-
 CREATE SCHEMA IF NOT EXISTS raw;
 CREATE SCHEMA IF NOT EXISTS clean;
 CREATE SCHEMA IF NOT EXISTS inference;
@@ -93,5 +91,3 @@ CREATE INDEX IF NOT EXISTS ix_inference_logs_requested_at
     ON inference.logs (requested_at DESC);
 CREATE INDEX IF NOT EXISTS ix_inference_logs_model
     ON inference.logs (model_name, model_version);
-
-COMMIT;
