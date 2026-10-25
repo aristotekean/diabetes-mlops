@@ -34,6 +34,9 @@ mlartifacts/
 *.pkl
 *.joblib
 
+# Locust results
+infra/load-testing/results/
+
 # Airflow local runtime
 apps/airflow/logs/
 airflow.db

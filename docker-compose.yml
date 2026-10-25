@@ -12,8 +12,9 @@
 # MLFLOW_ALLOWED_HOSTS, AIRFLOW_PORT, AIRFLOW_ADMIN_USER, AIRFLOW_ADMIN_PASSWORD,
 # AIRFLOW_JWT_SECRET.
 #
-# Locust is NOT part of this stack: the load generator runs on another host
-# (Server B), so it does not compete with the API for CPU.
+# Locust (Server B) is behind the `loadtest` profile, so it never starts by
+# default and does not compete with the API for CPU:
+#   docker compose --profile loadtest up -d     # see infra/load-testing
 #
 # The API serves the model registered in MLflow under the `production` alias.
 # Until a training DAG registers one, the API exits and restarts.
@@ -22,6 +23,7 @@ name: diabetes
 
 include:
   - path: apps/airflow/compose.yml
+  - path: infra/load-testing/docker-compose.yml
 
 x-mlflow-client-env: &mlflow-client-env
   MLFLOW_TRACKING_URI: http://mlflow:5000
