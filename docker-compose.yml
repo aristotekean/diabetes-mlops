@@ -1,0 +1,182 @@
+# Diabetes MLOps · docker compose
+#
+#   S1 mlflow-db   PostgreSQL  <--->  S2 MLflow        (experiments, runs, registry metadata)
+#   S3 MinIO                   <--->  S2 MLflow        (artifacts: models, metrics, plots)
+#   S4 Inference API           <--->  S2 MLflow        (loads the registered model to serve)
+#
+# Local development stack (from the repository root):
+#   docker compose up -d --build
+# Tunables (env or .env): API_PORT, API_CPUS, API_MEMORY, MLFLOW_ALLOWED_HOSTS.
+#
+# Locust is NOT part of this stack: the load generator runs on another host
+# (Server B), so it does not compete with the API for CPU.
+#
+# Serving-only stack: training (Airflow + training Postgres) is not deployed
+# here. The API serves the model already registered in MLflow, so the volumes
+# diabetes_mlflow_db and diabetes_minio must contain it. Without a model under
+# the `production` alias the API exits and restarts.
+
+name: diabetes
+
+x-mlflow-client-env: &mlflow-client-env
+  MLFLOW_TRACKING_URI: http://mlflow:5000
+  # Artifacts are proxied by the server (--serve-artifacts), so clients only
+  # need the tracking URI. The S3 variables are kept so direct access to the
+  # bucket also works when needed.
+  MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+  AWS_ACCESS_KEY_ID: minioadmin
+  AWS_SECRET_ACCESS_KEY: minioadmin
+
+services:
+  # ------------------------------------------------------------------------- #
+  # S1 · PostgreSQL (MLflow backend store, internal to the stack, own volume)
+  # ------------------------------------------------------------------------- #
+  mlflow-db:
+    image: postgres:16
+    container_name: diabetes-mlflow-db
+    environment:
+      POSTGRES_DB: mlflow
+      POSTGRES_USER: mlflow
+      POSTGRES_PASSWORD: mlflow
+    ports:
+      - "5431:5432"
+    volumes:
+      - mlflow-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD", "pg_isready", "-U", "mlflow", "-d", "mlflow" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------------- #
+  # S3 · MinIO (artifact store for MLflow)
+  #
+  # Chainguard build of MinIO (MinIO removed its own public images in 2026-09).
+  # Distroless-style image: runs as uid 65532, ships `minio` and `mc` only.
+  # ------------------------------------------------------------------------- #
+  minio:
+    image: cgr.dev/chainguard/minio:latest
+    container_name: diabetes-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: [ "CMD", "mc", "ready", "local" ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  # One-shot: MinIO does not create buckets on start. Reuse the same image
+  # (it ships `mc`) to create the MLflow artifact bucket before the server
+  # comes up.
+  minio-init:
+    image: cgr.dev/chainguard/minio:latest
+    container_name: diabetes-minio-init
+    entrypoint: [ "/bin/sh", "-c" ]
+    command:
+      - |
+        mc alias set local http://minio:9000 minioadmin minioadmin
+        mc mb --ignore-existing local/mlflow
+        echo "bucket ready: mlflow"
+    depends_on:
+      minio:
+        condition: service_healthy
+
+  # ------------------------------------------------------------------------- #
+  # S2 · MLflow (tracking server + model registry)
+  #
+  # Backend store: mlflow-db. Artifacts: MinIO bucket `mlflow`, proxied through
+  # the server so clients never need bucket credentials.
+  #
+  # Official MLflow image. It ships MLflow only, so the two client libraries
+  # the server needs (psycopg2 for Postgres, boto3 for S3/MinIO) are installed
+  # at container start instead of baking a custom image. This needs network
+  # access on every start and adds ~30-60 s before the server is up (see
+  # start_period). Pin both versions to keep starts reproducible.
+  # ------------------------------------------------------------------------- #
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v3.16.1
+    container_name: diabetes-mlflow
+    entrypoint: [ "/bin/sh", "-c" ]
+    command:
+      - |
+        pip install --no-cache-dir --quiet \
+          psycopg2-binary==2.9.10 \
+          boto3==1.40.49
+        # DNS-rebinding guard (--allowed-hosts): by default only localhost /
+        # private IPs pass. The in-network service name (clients) and the
+        # OrbStack domain are allowed; on a VM add its IP/hostname via
+        # MLFLOW_ALLOWED_HOSTS to open the UI.
+        exec mlflow server \
+          --host 0.0.0.0 \
+          --port 5000 \
+          --backend-store-uri postgresql+psycopg2://mlflow:mlflow@mlflow-db:5432/mlflow \
+          --artifacts-destination s3://mlflow \
+          --serve-artifacts \
+          --allowed-hosts "localhost:*,127.0.0.1:*,mlflow:*,*.orb.local${MLFLOW_ALLOWED_HOSTS:+,${MLFLOW_ALLOWED_HOSTS}}"
+    environment:
+      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+    ports:
+      # Host port 5001: macOS AirPlay Receiver squats 5000 on the host.
+      - "5001:5000"
+    healthcheck:
+      test: [ "CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:5000/health', timeout=4)" ]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      # Covers the pip install at start plus MLflow's own boot.
+      start_period: 90s
+    depends_on:
+      mlflow-db:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------------- #
+  # S4 · Inference API (serves the model registered in MLflow)
+  #
+  # Built from apps/api-inference/Dockerfile with the repository root as
+  # context. Single replica with a published host port for local development;
+  # in the cluster the Ingress controller fronts it instead.
+  # ------------------------------------------------------------------------- #
+  api-inference:
+    image: ${DOCKERHUB_USER:-aristotekean}/diabetes-api-inference:0.1.0
+    build:
+      context: .
+      dockerfile: apps/api-inference/Dockerfile
+    container_name: diabetes-api-inference
+    ports:
+      - "${API_PORT:-8000}:8000"
+    environment:
+      <<: *mlflow-client-env
+      MODEL_NAME: diabetes
+      # Registry alias resolved at startup: models:/<MODEL_NAME>@<MODEL_ALIAS>
+      MODEL_ALIAS: production
+    deploy:
+      resources:
+        limits:
+          cpus: "${API_CPUS:-1}"
+          memory: ${API_MEMORY:-1g}
+    depends_on:
+      mlflow:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  mlflow-db-data:
+    name: diabetes_mlflow_db
+  minio-data:
+    name: diabetes_minio
