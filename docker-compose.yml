@@ -4,11 +4,13 @@
 #   S3 MinIO                   <--->  S2 MLflow        (artifacts: models, metrics, plots)
 #   S4 Inference API           <--->  S2 MLflow        (loads the registered model to serve)
 #   S5 postgres-train + S6 Airflow     see apps/airflow/compose.yml (included below)
+#   S7 Frontend                ---->  S4 Inference API (Streamlit UI)
 #
 # From the repository root:
 #   docker compose up -d --build
-# Tunables (env or .env): API_PORT, API_CPUS, API_MEMORY, MLFLOW_ALLOWED_HOSTS,
-# AIRFLOW_PORT, AIRFLOW_ADMIN_USER, AIRFLOW_ADMIN_PASSWORD, AIRFLOW_JWT_SECRET.
+# Tunables (env or .env): API_PORT, API_CPUS, API_MEMORY, FRONTEND_PORT,
+# MLFLOW_ALLOWED_HOSTS, AIRFLOW_PORT, AIRFLOW_ADMIN_USER, AIRFLOW_ADMIN_PASSWORD,
+# AIRFLOW_JWT_SECRET.
 #
 # Locust is NOT part of this stack: the load generator runs on another host
 # (Server B), so it does not compete with the API for CPU.
@@ -176,6 +178,23 @@ services:
     depends_on:
       mlflow:
         condition: service_healthy
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------------- #
+  # S7 · Frontend (Streamlit UI; talks to the Inference API only)
+  # ------------------------------------------------------------------------- #
+  frontend:
+    image: ${DOCKERHUB_USER:-aristotekean}/diabetes-frontend:0.1.0
+    build:
+      context: .
+      dockerfile: apps/frontend/Dockerfile
+    container_name: diabetes-frontend
+    ports:
+      - "${FRONTEND_PORT:-8501}:8501"
+    environment:
+      API_URL: http://api-inference:8000
+    depends_on:
+      - api-inference
     restart: unless-stopped
 
 volumes:
