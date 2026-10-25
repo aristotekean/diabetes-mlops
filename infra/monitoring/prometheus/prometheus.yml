@@ -1,0 +1,30 @@
+# Prometheus scrape configuration · Server C (observability)
+#
+# Scrapes the Inference API's /metrics endpoint. In the local compose stack the
+# API is reachable as `api-inference:8000` on the shared network. On a dedicated
+# Server C, point the target at Server A's address/port instead (or edit it via
+# the API_METRICS_TARGET note in infra/monitoring/README.md).
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: diabetes-mlops
+
+scrape_configs:
+  # The service under observation. The target lives in a separate file
+  # (prometheus/targets/api-targets.yml) so it can be changed per deployment
+  # without editing this config: `api-inference:8000` on the local compose
+  # network, or Server A's tailnet name (e.g. server-a:8000) from a dedicated
+  # Server C joined to Tailscale. file_sd reloads the target automatically.
+  - job_name: diabetes-api
+    metrics_path: /metrics
+    file_sd_configs:
+      - files: ["/etc/prometheus/targets/*.yml"]
+
+  # Prometheus scraping itself (useful to confirm the stack is alive).
+  # localhost works in both modes: on its own network, and when it shares the
+  # Tailscale sidecar's network namespace.
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

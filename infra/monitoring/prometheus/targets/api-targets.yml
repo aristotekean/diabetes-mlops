@@ -1,0 +1,15 @@
+# Scrape target for the Inference API (file_sd for job `diabetes-api`).
+#
+# Local compose network (root docker-compose.yml): the Docker service name.
+#   - targets: ["api-inference:8000"]
+#
+# Dedicated Server C joined to Tailscale (docker-compose.tailscale.yml): the
+# tailnet name of the node that runs the API on Server A, e.g.
+#   - targets: ["server-a:8000"]            # MagicDNS short name
+#   - targets: ["api.<tailnet>.ts.net:8000"]
+#
+# Prometheus reloads this file automatically; no restart needed after editing.
+
+- targets: ["api-inference:8000"]
+  labels:
+    service: api-inference

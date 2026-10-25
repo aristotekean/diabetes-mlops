@@ -24,6 +24,7 @@ name: diabetes
 include:
   - path: apps/airflow/compose.yml
   - path: infra/load-testing/docker-compose.yml
+  - path: infra/monitoring/docker-compose.yml
 
 x-mlflow-client-env: &mlflow-client-env
   MLFLOW_TRACKING_URI: http://mlflow:5000

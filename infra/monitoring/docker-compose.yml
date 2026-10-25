@@ -1,0 +1,89 @@
+# Diabetes MLOps · observability stack (Server C)
+#
+#   S8 Prometheus  --->  scrapes api-inference:8000/metrics
+#   S9 Grafana     --->  queries Prometheus, serves the dashboard
+#
+# Included by the root docker-compose.yml, so a plain `docker compose up`
+# brings monitoring up alongside the API. Paths are relative to this file.
+#
+# Local, with the full stack (from the repository root):
+#   docker compose up -d --build
+#   Prometheus UI on http://localhost:9090
+#   Grafana     UI on http://localhost:3000   (admin / admin)
+#   The "Diabetes · Inference API" dashboard is provisioned automatically.
+#
+# On a dedicated Server C (the API stack lives on Server A): run this file on
+# its own and point Prometheus at Server A by editing the scrape target in
+# prometheus/prometheus.yml (see infra/monitoring/README.md):
+#   docker compose -f docker-compose.yml up -d
+#
+# Tunables (env or .env): PROMETHEUS_PORT, GRAFANA_PORT,
+# GRAFANA_ADMIN_USER, GRAFANA_ADMIN_PASSWORD, PROMETHEUS_RETENTION.
+
+services:
+  # ------------------------------------------------------------------------- #
+  # S8 · Prometheus (metrics collection)
+  # ------------------------------------------------------------------------- #
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    container_name: diabetes-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-15d}
+      - --web.enable-lifecycle
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/targets:/etc/prometheus/targets:ro
+      - prometheus-data:/prometheus
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9090/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------------- #
+  # S9 · Grafana (dashboards)
+  #
+  # Datasource and dashboard are provisioned from infra/monitoring/grafana, so
+  # the "Diabetes · Inference API" dashboard is present on first start with no
+  # manual setup.
+  # ------------------------------------------------------------------------- #
+  grafana:
+    image: grafana/grafana:11.4.0
+    container_name: diabetes-grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      # Datasource URL used by the provisioned datasource. Separate containers
+      # on the compose network reach Prometheus by its service name.
+      PROMETHEUS_URL: http://prometheus:9090
+      # Land on the provisioned dashboard straight away.
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/diabetes-api.json
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:3000/api/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+volumes:
+  prometheus-data:
+    name: diabetes_prometheus
+  grafana-data:
+    name: diabetes_grafana
