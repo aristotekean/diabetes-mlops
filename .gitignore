@@ -33,6 +33,7 @@ mlruns/
 mlartifacts/
 *.pkl
 *.joblib
+/data/Diabetes/Diabetes.csv
 
 # Locust results
 infra/load-testing/results/
