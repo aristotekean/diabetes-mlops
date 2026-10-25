@@ -1,0 +1,1256 @@
+From 7424ee4fa8ed28fde4fabed9a3b7d84f5d01a6a9 Mon Sep 17 00:00:00 2001
+From: aristotekean <correo.ammp@gmail.com>
+Date: Sun, 25 Oct 2026 17:22:38 +0000
+Subject: [PATCH 1/2] feat(monitoring): add Prometheus + Grafana observability
+ stack
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Exponer métricas de la API de inferencia y visualizarlas (Server C):
+
+- instrumenta la API con prometheus-fastapi-instrumentator y expone /metrics
+  (http_requests_total y http_request_duration_seconds por method/handler/status,
+  más las gauges process_* de CPU y memoria del proceso)
+- Prometheus con scrape de api-inference:8000/metrics
+- Grafana con datasource y dashboard aprovisionados: total de solicitudes,
+  req/s, latencia promedio y p50/p95/p99, errores y tasa de error, CPU y memoria
+- compose de monitoreo (infra/monitoring) incluido en el docker-compose raíz
+- README con uso local, despliegue en Server C dedicado y variables
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HREX9gonv5UPepAoepCinV
+---
+ apps/api-inference/pyproject.toml             |   1 +
+ apps/api-inference/src/api_inference/main.py  |  47 ++
+ apps/api-inference/uv.lock                    |  24 +
+ docker-compose.yml                            |   1 +
+ infra/monitoring/.keep                        |   0
+ infra/monitoring/README.md                    |  98 ++++
+ infra/monitoring/docker-compose.yml           |  85 ++++
+ .../grafana/dashboards/diabetes-api.json      | 427 ++++++++++++++++++
+ .../provisioning/dashboards/dashboards.yml    |  15 +
+ .../provisioning/datasources/datasource.yml   |  16 +
+ infra/monitoring/prometheus/prometheus.yml    |  26 ++
+ 11 files changed, 740 insertions(+)
+ delete mode 100644 infra/monitoring/.keep
+ create mode 100644 infra/monitoring/README.md
+ create mode 100644 infra/monitoring/docker-compose.yml
+ create mode 100644 infra/monitoring/grafana/dashboards/diabetes-api.json
+ create mode 100644 infra/monitoring/grafana/provisioning/dashboards/dashboards.yml
+ create mode 100644 infra/monitoring/grafana/provisioning/datasources/datasource.yml
+ create mode 100644 infra/monitoring/prometheus/prometheus.yml
+
+diff --git a/apps/api-inference/pyproject.toml b/apps/api-inference/pyproject.toml
+index dbbf684..00b24d1 100644
+--- a/apps/api-inference/pyproject.toml
++++ b/apps/api-inference/pyproject.toml
+@@ -10,6 +10,7 @@ requires-python = ">=3.15"
+ dependencies = [
+     "fastapi>=0.162.0",
+     "uvicorn>=0.54.0",
++    "prometheus-fastapi-instrumentator>=7.1.0",
+ ]
+ 
+ [build-system]
+diff --git a/apps/api-inference/src/api_inference/main.py b/apps/api-inference/src/api_inference/main.py
+index 0aad0c2..44231e9 100644
+--- a/apps/api-inference/src/api_inference/main.py
++++ b/apps/api-inference/src/api_inference/main.py
+@@ -1,4 +1,17 @@
++"""Diabetes Inference API.
++
++Besides the model-serving endpoints, the app exposes Prometheus metrics at
++``/metrics`` so Server C (Prometheus + Grafana, see ``infra/monitoring``) can
++scrape request rate, latency and error metrics, plus the process CPU/memory
++gauges that ``prometheus_client`` registers by default.
++
++Instrumentation is intentionally transport-level: every route the API gains
++(``/predict``, ``/model-info``, …) is tracked automatically through the
++``handler`` label, with no extra wiring per endpoint.
++"""
++
+ from fastapi import FastAPI
++from prometheus_fastapi_instrumentator import Instrumentator, metrics
+ 
+ app = FastAPI(title="Diabetes Inference API", version="0.1.0")
+ 
+@@ -7,3 +20,37 @@ app = FastAPI(title="Diabetes Inference API", version="0.1.0")
+ def health() -> dict[str, str]:
+     """Liveness probe used by Docker HEALTHCHECK and Kubernetes."""
+     return {"status": "ok"}
++
++
++# Prometheus instrumentation. Two explicit metrics, both labelled so the
++# Grafana dashboard (infra/monitoring) can slice by endpoint and status:
++#
++#   http_requests_total{method,handler,status}   Counter
++#       total requests, requests/sec, errors and error rate
++#       (status grouped as "2xx"/"4xx"/"5xx").
++#   http_request_duration_seconds{method,handler} Histogram
++#       average latency (sum/count) and p50/p95/p99 (bucket + histogram_quantile).
++#
++# prometheus_client also registers process_* gauges on import, so the pod's
++# CPU (process_cpu_seconds_total) and memory (process_resident_memory_bytes)
++# are exported without extra wiring. Every route the API gains is tracked
++# automatically through the `handler` label; /metrics excludes itself.
++_LATENCY_BUCKETS = (
++    0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
++)
++
++(
++    Instrumentator(
++        should_group_status_codes=True,
++        excluded_handlers=["/metrics"],
++    )
++    .add(metrics.requests(metric_name="http_requests_total"))
++    .add(
++        metrics.latency(
++            metric_name="http_request_duration_seconds",
++            buckets=_LATENCY_BUCKETS,
++        )
++    )
++    .instrument(app)
++    .expose(app, endpoint="/metrics", include_in_schema=True)
++)
+diff --git a/apps/api-inference/uv.lock b/apps/api-inference/uv.lock
+index b060b46..96d52df 100644
+--- a/apps/api-inference/uv.lock
++++ b/apps/api-inference/uv.lock
+@@ -38,12 +38,14 @@ version = "0.1.0"
+ source = { editable = "." }
+ dependencies = [
+     { name = "fastapi" },
++    { name = "prometheus-fastapi-instrumentator" },
+     { name = "uvicorn" },
+ ]
+ 
+ [package.metadata]
+ requires-dist = [
+     { name = "fastapi", specifier = ">=0.162.0" },
++    { name = "prometheus-fastapi-instrumentator", specifier = ">=7.1.0" },
+     { name = "uvicorn", specifier = ">=0.54.0" },
+ ]
+ 
+@@ -103,6 +105,28 @@ wheels = [
+     { url = "https://files.pythonhosted.org/packages/1e/41/f7dcf80b81ee8e71c1a2b59f14208bc723edbd89ed027a73b175abf6348e/opentelemetry_api-1.45.1-py3-none-any.whl", hash = "sha256:b31553efa588ae44bc306f863c785c5333a9ecc091248c6ee68b4b6c87fdedfb", size = 60256, upload-time = "2026-10-06T17:32:33.506Z" },
+ ]
+ 
++[[package]]
++name = "prometheus-client"
++version = "0.26.0"
++source = { registry = "https://pypi.org/simple" }
++sdist = { url = "https://files.pythonhosted.org/packages/52/73/f1334c29c2af4cd9dba6c7817e61b611bd0215e2eb5565c6064a4de18802/prometheus_client-0.26.0.tar.gz", hash = "sha256:04a91bcf94e2cf74a44a1a874d651a2e853ed354b6e822f3b7487751465d5c2b", size = 92910, upload-time = "2026-07-24T19:36:41.893Z" }
++wheels = [
++    { url = "https://files.pythonhosted.org/packages/eb/a3/b69efbf4143b5b9859b977770bbbabcc2796b702fa69dc40271e45cd5a56/prometheus_client-0.26.0-py3-none-any.whl", hash = "sha256:fa93d06737aa02bacd05794768508bb97d2fbee28cb3bca04eaae92f0ca953d6", size = 64494, upload-time = "2026-07-24T19:36:40.854Z" },
++]
++
++[[package]]
++name = "prometheus-fastapi-instrumentator"
++version = "8.1.0"
++source = { registry = "https://pypi.org/simple" }
++dependencies = [
++    { name = "prometheus-client" },
++    { name = "starlette" },
++]
++sdist = { url = "https://files.pythonhosted.org/packages/95/f4/cdcebf7094b03b99fba71ac8f56bd6f227973642662f49d272332d8419b3/prometheus_fastapi_instrumentator-8.1.0.tar.gz", hash = "sha256:b77f3043665e8d28e2bbd21017506195a43d9adf1d402d01bf95b494b7e560e1", size = 20492, upload-time = "2026-07-26T11:12:44.202Z" }
++wheels = [
++    { url = "https://files.pythonhosted.org/packages/44/b9/91a2246e6cf01b7ccb14479803c8a50f9c258ae5c6a0f16ba3294820632b/prometheus_fastapi_instrumentator-8.1.0-py3-none-any.whl", hash = "sha256:b9f40b2cff3f7891ca0610b3ae4fc6ec723fd326b04bb659819aaeb821a0fc7d", size = 19649, upload-time = "2026-07-26T11:12:45.168Z" },
++]
++
+ [[package]]
+ name = "pydantic"
+ version = "2.14.1"
+diff --git a/docker-compose.yml b/docker-compose.yml
+index 946761b..14ca09a 100644
+--- a/docker-compose.yml
++++ b/docker-compose.yml
+@@ -24,6 +24,7 @@ name: diabetes
+ include:
+   - path: apps/airflow/compose.yml
+   - path: infra/load-testing/docker-compose.yml
++  - path: infra/monitoring/docker-compose.yml
+ 
+ x-mlflow-client-env: &mlflow-client-env
+   MLFLOW_TRACKING_URI: http://mlflow:5000
+diff --git a/infra/monitoring/.keep b/infra/monitoring/.keep
+deleted file mode 100644
+index e69de29..0000000
+diff --git a/infra/monitoring/README.md b/infra/monitoring/README.md
+new file mode 100644
+index 0000000..e17cff9
+--- /dev/null
++++ b/infra/monitoring/README.md
+@@ -0,0 +1,98 @@
++# Observabilidad · Server C (Prometheus + Grafana)
++
++Stack de monitoreo de la API de inferencia. Prometheus recolecta las métricas
++que la API expone en `/metrics` y Grafana las visualiza en el dashboard
++**Diabetes · Inference API**.
++
++```
++api-inference:8000/metrics  ──scrape──▶  S8 Prometheus  ──query──▶  S9 Grafana
++```
++
++## Qué se mide
++
++La API (`apps/api-inference`) está instrumentada con
++[`prometheus-fastapi-instrumentator`](https://github.com/trallnag/prometheus-fastapi-instrumentator).
++Cada ruta se mide automáticamente a través de la etiqueta `handler`:
++
++| Métrica | Tipo | Etiquetas | Uso en el dashboard |
++|---------|------|-----------|---------------------|
++| `http_requests_total` | Counter | `method`, `handler`, `status` | total, req/s, errores, tasa de error |
++| `http_request_duration_seconds` | Histogram | `method`, `handler`, `status` | latencia promedio y percentiles p50/p95/p99 |
++| `process_cpu_seconds_total` | Counter | — | CPU del pod de la API |
++| `process_resident_memory_bytes` | Gauge | — | memoria del pod de la API |
++
++El `status` se agrupa como `2xx` / `4xx` / `5xx`.
++
++## Paneles del dashboard
++
++Cubre los mínimos exigidos por el enunciado:
++
++- Solicitudes totales · solicitudes por segundo
++- Latencia promedio · latencia p95 (KPI) y serie p50/p95/p99
++- Número de errores (4xx/5xx) · tasa de error (KPI y en el tiempo)
++- Solicitudes por estado · solicitudes por endpoint
++- CPU y memoria del pod de la API
++
++## Uso local (stack completo)
++
++Desde la raíz del repositorio, el compose de monitoreo se incluye en el
++`docker-compose.yml` principal, así que sube junto con el resto:
++
++```bash
++docker compose up -d --build
++```
++
++| Servicio | URL | Credenciales |
++|----------|-----|--------------|
++| Prometheus | <http://localhost:9090> | — |
++| Grafana | <http://localhost:3000> | `admin` / `admin` |
++
++Grafana abre directamente en el dashboard **Diabetes · Inference API** (datasource
++y dashboard se aprovisionan solos desde `grafana/provisioning`).
++
++Para ver datos: generar tráfico contra la API (`/health`, `/predict`) o lanzar
++Locust (`docker compose --profile loadtest up -d`, ver `infra/load-testing`) y
++observar cómo cambian los paneles durante la prueba de carga.
++
++## Despliegue en un Server C dedicado
++
++Cuando el monitoreo corre en una máquina aparte del clúster, se ejecuta este
++compose por su cuenta y se apunta Prometheus a la API del Server A editando el
++target en [`prometheus/prometheus.yml`](prometheus/prometheus.yml):
++
++```yaml
++scrape_configs:
++  - job_name: diabetes-api
++    metrics_path: /metrics
++    static_configs:
++      - targets: ["<SERVER_A>:<PUERTO_API>"]
++```
++
++```bash
++docker compose -f docker-compose.yml up -d
++```
++
++## Variables de entorno (opcionales)
++
++| Variable | Default | Descripción |
++|----------|---------|-------------|
++| `PROMETHEUS_PORT` | `9090` | puerto publicado de Prometheus |
++| `PROMETHEUS_RETENTION` | `15d` | retención de la TSDB |
++| `GRAFANA_PORT` | `3000` | puerto publicado de Grafana |
++| `GRAFANA_ADMIN_USER` | `admin` | usuario admin de Grafana |
++| `GRAFANA_ADMIN_PASSWORD` | `admin` | contraseña admin de Grafana |
++
++## Estructura
++
++```
++infra/monitoring/
++├── docker-compose.yml                    S8 Prometheus + S9 Grafana
++├── prometheus/
++│   └── prometheus.yml                    configuración de scrape
++└── grafana/
++    ├── provisioning/
++    │   ├── datasources/datasource.yml    Prometheus (uid: prometheus)
++    │   └── dashboards/dashboards.yml      provider de dashboards
++    └── dashboards/
++        └── diabetes-api.json              dashboard principal
++```
+diff --git a/infra/monitoring/docker-compose.yml b/infra/monitoring/docker-compose.yml
+new file mode 100644
+index 0000000..858b442
+--- /dev/null
++++ b/infra/monitoring/docker-compose.yml
+@@ -0,0 +1,85 @@
++# Diabetes MLOps · observability stack (Server C)
++#
++#   S8 Prometheus  --->  scrapes api-inference:8000/metrics
++#   S9 Grafana     --->  queries Prometheus, serves the dashboard
++#
++# Included by the root docker-compose.yml, so a plain `docker compose up`
++# brings monitoring up alongside the API. Paths are relative to this file.
++#
++# Local, with the full stack (from the repository root):
++#   docker compose up -d --build
++#   Prometheus UI on http://localhost:9090
++#   Grafana     UI on http://localhost:3000   (admin / admin)
++#   The "Diabetes · Inference API" dashboard is provisioned automatically.
++#
++# On a dedicated Server C (the API stack lives on Server A): run this file on
++# its own and point Prometheus at Server A by editing the scrape target in
++# prometheus/prometheus.yml (see infra/monitoring/README.md):
++#   docker compose -f docker-compose.yml up -d
++#
++# Tunables (env or .env): PROMETHEUS_PORT, GRAFANA_PORT,
++# GRAFANA_ADMIN_USER, GRAFANA_ADMIN_PASSWORD, PROMETHEUS_RETENTION.
++
++services:
++  # ------------------------------------------------------------------------- #
++  # S8 · Prometheus (metrics collection)
++  # ------------------------------------------------------------------------- #
++  prometheus:
++    image: prom/prometheus:v3.1.0
++    container_name: diabetes-prometheus
++    command:
++      - --config.file=/etc/prometheus/prometheus.yml
++      - --storage.tsdb.path=/prometheus
++      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-15d}
++      - --web.enable-lifecycle
++    ports:
++      - "${PROMETHEUS_PORT:-9090}:9090"
++    volumes:
++      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
++      - prometheus-data:/prometheus
++    healthcheck:
++      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9090/-/healthy"]
++      interval: 15s
++      timeout: 5s
++      retries: 5
++      start_period: 15s
++    restart: unless-stopped
++
++  # ------------------------------------------------------------------------- #
++  # S9 · Grafana (dashboards)
++  #
++  # Datasource and dashboard are provisioned from infra/monitoring/grafana, so
++  # the "Diabetes · Inference API" dashboard is present on first start with no
++  # manual setup.
++  # ------------------------------------------------------------------------- #
++  grafana:
++    image: grafana/grafana:11.4.0
++    container_name: diabetes-grafana
++    environment:
++      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
++      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
++      GF_USERS_ALLOW_SIGN_UP: "false"
++      # Land on the provisioned dashboard straight away.
++      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/diabetes-api.json
++    ports:
++      - "${GRAFANA_PORT:-3000}:3000"
++    volumes:
++      - ./grafana/provisioning:/etc/grafana/provisioning:ro
++      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
++      - grafana-data:/var/lib/grafana
++    depends_on:
++      prometheus:
++        condition: service_healthy
++    healthcheck:
++      test: ["CMD-SHELL", "wget --spider -q http://localhost:3000/api/health || exit 1"]
++      interval: 15s
++      timeout: 5s
++      retries: 5
++      start_period: 20s
++    restart: unless-stopped
++
++volumes:
++  prometheus-data:
++    name: diabetes_prometheus
++  grafana-data:
++    name: diabetes_grafana
+diff --git a/infra/monitoring/grafana/dashboards/diabetes-api.json b/infra/monitoring/grafana/dashboards/diabetes-api.json
+new file mode 100644
+index 0000000..2f6fe6e
+--- /dev/null
++++ b/infra/monitoring/grafana/dashboards/diabetes-api.json
+@@ -0,0 +1,427 @@
++{
++  "annotations": {
++    "list": [
++      {
++        "builtIn": 1,
++        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
++        "enable": true,
++        "hide": true,
++        "iconColor": "rgba(0, 211, 255, 1)",
++        "name": "Annotations & Alerts",
++        "type": "dashboard"
++      }
++    ]
++  },
++  "editable": true,
++  "fiscalYearStartMonth": 0,
++  "graphTooltip": 1,
++  "links": [],
++  "liveNow": false,
++  "refresh": "10s",
++  "schemaVersion": 39,
++  "tags": ["diabetes", "mlops", "inference-api"],
++  "templating": { "list": [] },
++  "time": { "from": "now-15m", "to": "now" },
++  "timepicker": {},
++  "timezone": "browser",
++  "title": "Diabetes · Inference API",
++  "uid": "diabetes-api",
++  "version": 1,
++  "panels": [
++    {
++      "id": 1,
++      "type": "stat",
++      "title": "Solicitudes totales",
++      "description": "Número total de solicitudes atendidas por la API.",
++      "datasource": { "type": "prometheus", "uid": "prometheus" },
++      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 0 },
++      "targets": [
++        {
++          "refId": "A",
++          "datasource": { "type": "prometheus", "uid": "prometheus" },
++          "expr": "sum(http_requests_total) or vector(0)"
++        }
++      ],
++      "options": {
++        "colorMode": "value",
++        "graphMode": "area",
++        "justifyMode": "auto",
++        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
++        "textMode": "auto"
++      },
++      "fieldConfig": {
++        "defaults": {
++          "unit": "short",
++          "decimals": 0,
++          "color": { "mode": "fixed", "fixedColor": "blue" }
++        },
++        "overrides": []
++      }
++    },
++    {
++      "id": 2,
++      "type": "stat",
++      "title": "Solicitudes por segundo",
++      "description": "Tasa de solicitudes (req/s) en el último minuto.",
++      "datasource": { "type": "prometheus", "uid": "prometheus" },
++      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 0 },
++      "targets": [
++        {
++          "refId": "A",
++          "datasource": { "type": "prometheus", "uid": "prometheus" },
++          "expr": "sum(rate(http_requests_total[1m])) or vector(0)"
++        }
++      ],
++      "options": {
++        "colorMode": "value",
++        "graphMode": "area",
++        "justifyMode": "auto",
++        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
++        "textMode": "auto"
++      },
++      "fieldConfig": {
++        "defaults": {
++          "unit": "reqps",
++          "decimals": 2,
++          "color": { "mode": "fixed", "fixedColor": "green" }
++        },
++        "overrides": []
++      }
++    },
++    {
++      "id": 3,
++      "type": "stat",
++      "title": "Latencia promedio",
++      "description": "Latencia media = rate(sum) / rate(count) sobre 5m.",
++      "datasource": { "type": "prometheus", "uid": "prometheus" },
++      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 0 },
++      "targets": [
++        {
++          "refId": "A",
++          "datasource": { "type": "prometheus", "uid": "prometheus" },
++          "expr": "(sum(rate(http_request_duration_seconds_sum[5m])) / sum(rate(http_request_duration_seconds_count[5m]))) or vector(0)"
++        }
++      ],
++      "options": {
++        "colorMode": "value",
++        "graphMode": "area",
++        "justifyMode": "auto",
++        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
++        "textMode": "auto"
++      },
++      "fieldConfig": {
++        "defaults": {
++          "unit": "s",
++          "decimals": 3,
++          "color": { "mode": "thresholds" },
++          "thresholds": {
++            "mode": "absolute",
++            "steps": [
++              { "color": "green", "value": null },
++              { "color": "yellow", "value": 0.3 },
++              { "color": "red", "value": 1 }
++            ]
++          }
++        },
++        "overrides": []
++      }
++    },
++    {
++      "id": 4,
++      "type": "stat",
++      "title": "Latencia p95",
++      "description": "Percentil 95 de latencia sobre 5m.",
++      "datasource": { "type": "prometheus", "uid": "prometheus" },
++      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 0 },
++      "targets": [
++        {
++          "refId": "A",
++          "datasource": { "type": "prometheus", "uid": "prometheus" },
++          "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))"
++        }
++      ],
++      "options": {
++        "colorMode": "value",
++        "graphMode": "area",
++        "justifyMode": "auto",
++        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
++        "textMode": "auto"
++      },
++      "fieldConfig": {
++        "defaults": {
++          "unit": "s",
++          "decimals": 3,
++          "color": { "mode": "thresholds" },
++          "thresholds": {
++            "mode": "absolute",
++            "steps": [
++              { "color": "green", "value": null },
++              { "color": "yellow", "value": 0.5 },
++              { "color": "red", "value": 2 }
++            ]
++          }
++        },
++        "overrides": []
++      }
++    },
++    {
++      "id": 5,
++      "type": "stat",
++      "title": "Errores (4xx/5xx)",
++      "description": "Número total de solicitudes con estado 4xx o 5xx.",
++      "datasource": { "type": "prometheus", "uid": "prometheus" },
++      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 0 },
++      "targets": [
++        {
++          "refId": "A",
++          "datasource": { "type": "prometheus", "uid": "prometheus" },
++          "expr": "sum(http_requests_total{status=~\"4xx|5xx\"}) or vector(0)"
++        }
++      ],
++      "options": {
++        "colorMode": "value",
++        "graphMode": "area",
++        "justifyMode": "auto",
++        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
++        "textMode": "auto"
++      },
++      "fieldConfig": {
++        "defaults": {
++          "unit": "short",
++          "decimals": 0,
++          "color": { "mode": "thresholds" },
++          "thresholds": {
++            "mode": "absolute",
++            "steps": [
++              { "color": "green", "value": null },
++              { "color": "red", "value": 1 }
++            ]
++          }
++        },
++        "overrides": []
++      }
++    },
++    {
++      "id": 6,
++      "type": "stat",
++      "title": "Tasa de error",
++      "description": "Proporción de solicitudes 4xx/5xx sobre el total (5m).",
++      "datasource": { "type": "prometheus", "uid": "prometheus" },
++      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 0 },
++      "targets": [
++        {
++          "refId": "A",
++          "datasource": { "type": "prometheus", "uid": "prometheus" },
++          "expr": "(sum(rate(http_requests_total{status=~\"4xx|5xx\"}[5m])) / sum(rate(http_requests_total[5m]))) or vector(0)"
++        }
++      ],
++      "options": {
++        "colorMode": "value",
++        "graphMode": "area",
++        "justifyMode": "auto",
++        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
++        "textMode": "auto"
++      },
++      "fieldConfig": {
++        "defaults": {
++          "unit": "percentunit",
++          "decimals": 2,
++          "color": { "mode": "thresholds" },
++          "thresholds": {
++            "mode": "absolute",
++            "steps": [
++              { "color": "green", "value": null },
++              { "color": "yellow", "value": 0.01 },
++              { "color": "red", "value": 0.05 }
++            ]
++          }
++        },
++        "overrides": []
++      }
++    },
++    {
++      "id": 7,
++      "type": "timeseries",
++      "title": "Latencia por percentiles (p50 / p95 / p99)",
++      "description": "histogram_quantile sobre http_request_duration_seconds_bucket (5m).",
++      "datasource": { "type": "prometheus", "uid": "prometheus" },
++      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
++      "targets": [
++        {
++          "refId": "A",
++          "datasource": { "type": "prometheus", "uid": "prometheus" },
++          "expr": "histogram_quantile(0.50, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))",
++          "legendFormat": "p50"
++        },
++        {
++          "refId": "B",
++          "datasource": { "type": "prometheus", "uid": "prometheus" },
++          "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))",
++          "legendFormat": "p95"
++        },
++        {
++          "refId": "C",
++          "datasource": { "type": "prometheus", "uid": "prometheus" },
++          "expr": "histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))",
++          "legendFormat": "p99"
++        }
++      ],
++      "options": {
++        "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["mean", "max"] },
++        "tooltip": { "mode": "multi", "sort": "desc" }
++      },
++      "fieldConfig": {
++        "defaults": {
++          "unit": "s",
++          "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10, "showPoints": "never" }
++        },
++        "overrides": []
++      }
++    },
++    {
++      "id": 8,
++      "type": "timeseries",
++      "title": "Solicitudes por estado",
++      "description": "rate(http_requests_total) agrupado por grupo de estado (2xx/4xx/5xx).",
++      "datasource": { "type": "prometheus", "uid": "prometheus" },
++      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
++      "targets": [
++        {
++          "refId": "A",
++          "datasource": { "type": "prometheus", "uid": "prometheus" },
++          "expr": "sum by (status) (rate(http_requests_total[1m]))",
++          "legendFormat": "{{status}}"
++        }
++      ],
++      "options": {
++        "legend": { "displayMode": "list", "placement": "bottom", "calcs": [] },
++        "tooltip": { "mode": "multi", "sort": "desc" }
++      },
++      "fieldConfig": {
++        "defaults": {
++          "unit": "reqps",
++          "custom": { "drawStyle": "line", "lineInterpolation": "linear", "fillOpacity": 20, "showPoints": "never", "stacking": { "mode": "normal", "group": "A" } }
++        },
++        "overrides": [
++          { "matcher": { "id": "byName", "options": "2xx" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } } ] },
++          { "matcher": { "id": "byName", "options": "4xx" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } } ] },
++          { "matcher": { "id": "byName", "options": "5xx" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } } ] }
++        ]
++      }
++    },
++    {
++      "id": 9,
++      "type": "timeseries",
++      "title": "Solicitudes por endpoint",
++      "description": "rate(http_requests_total) agrupado por handler.",
++      "datasource": { "type": "prometheus", "uid": "prometheus" },
++      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
++      "targets": [
++        {
++          "refId": "A",
++          "datasource": { "type": "prometheus", "uid": "prometheus" },
++          "expr": "sum by (handler) (rate(http_requests_total[1m]))",
++          "legendFormat": "{{handler}}"
++        }
++      ],
++      "options": {
++        "legend": { "displayMode": "list", "placement": "bottom", "calcs": [] },
++        "tooltip": { "mode": "multi", "sort": "desc" }
++      },
++      "fieldConfig": {
++        "defaults": {
++          "unit": "reqps",
++          "custom": { "drawStyle": "line", "lineInterpolation": "linear", "fillOpacity": 10, "showPoints": "never" }
++        },
++        "overrides": []
++      }
++    },
++    {
++      "id": 10,
++      "type": "timeseries",
++      "title": "Tasa de error en el tiempo",
++      "description": "Proporción 4xx/5xx sobre el total (5m).",
++      "datasource": { "type": "prometheus", "uid": "prometheus" },
++      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
++      "targets": [
++        {
++          "refId": "A",
++          "datasource": { "type": "prometheus", "uid": "prometheus" },
++          "expr": "(sum(rate(http_requests_total{status=~\"4xx|5xx\"}[5m])) / sum(rate(http_requests_total[5m]))) or vector(0)",
++          "legendFormat": "tasa de error"
++        }
++      ],
++      "options": {
++        "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["mean", "max"] },
++        "tooltip": { "mode": "single", "sort": "none" }
++      },
++      "fieldConfig": {
++        "defaults": {
++          "unit": "percentunit",
++          "min": 0,
++          "custom": { "drawStyle": "line", "lineInterpolation": "linear", "fillOpacity": 20, "showPoints": "never", "gradientMode": "opacity" },
++          "color": { "mode": "fixed", "fixedColor": "red" }
++        },
++        "overrides": []
++      }
++    },
++    {
++      "id": 11,
++      "type": "timeseries",
++      "title": "CPU del pod de la API",
++      "description": "rate(process_cpu_seconds_total[1m]) — núcleos consumidos.",
++      "datasource": { "type": "prometheus", "uid": "prometheus" },
++      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
++      "targets": [
++        {
++          "refId": "A",
++          "datasource": { "type": "prometheus", "uid": "prometheus" },
++          "expr": "rate(process_cpu_seconds_total{job=\"diabetes-api\"}[1m])",
++          "legendFormat": "CPU (cores)"
++        }
++      ],
++      "options": {
++        "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["mean", "max"] },
++        "tooltip": { "mode": "single", "sort": "none" }
++      },
++      "fieldConfig": {
++        "defaults": {
++          "unit": "none",
++          "min": 0,
++          "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 15, "showPoints": "never" },
++          "color": { "mode": "fixed", "fixedColor": "purple" }
++        },
++        "overrides": []
++      }
++    },
++    {
++      "id": 12,
++      "type": "timeseries",
++      "title": "Memoria del pod de la API",
++      "description": "process_resident_memory_bytes — RSS del proceso.",
++      "datasource": { "type": "prometheus", "uid": "prometheus" },
++      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
++      "targets": [
++        {
++          "refId": "A",
++          "datasource": { "type": "prometheus", "uid": "prometheus" },
++          "expr": "process_resident_memory_bytes{job=\"diabetes-api\"}",
++          "legendFormat": "RSS"
++        }
++      ],
++      "options": {
++        "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["mean", "max"] },
++        "tooltip": { "mode": "single", "sort": "none" }
++      },
++      "fieldConfig": {
++        "defaults": {
++          "unit": "bytes",
++          "min": 0,
++          "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 15, "showPoints": "never" },
++          "color": { "mode": "fixed", "fixedColor": "blue" }
++        },
++        "overrides": []
++      }
++    }
++  ]
++}
+diff --git a/infra/monitoring/grafana/provisioning/dashboards/dashboards.yml b/infra/monitoring/grafana/provisioning/dashboards/dashboards.yml
+new file mode 100644
+index 0000000..c4c3aa0
+--- /dev/null
++++ b/infra/monitoring/grafana/provisioning/dashboards/dashboards.yml
+@@ -0,0 +1,15 @@
++# Grafana dashboard provisioning · loads every JSON under /var/lib/grafana/dashboards.
++
++apiVersion: 1
++
++providers:
++  - name: diabetes-mlops
++    orgId: 1
++    folder: Diabetes MLOps
++    type: file
++    disableDeletion: false
++    allowUiUpdates: true
++    updateIntervalSeconds: 30
++    options:
++      path: /var/lib/grafana/dashboards
++      foldersFromFilesStructure: false
+diff --git a/infra/monitoring/grafana/provisioning/datasources/datasource.yml b/infra/monitoring/grafana/provisioning/datasources/datasource.yml
+new file mode 100644
+index 0000000..978828d
+--- /dev/null
++++ b/infra/monitoring/grafana/provisioning/datasources/datasource.yml
+@@ -0,0 +1,16 @@
++# Grafana datasource provisioning · the Prometheus of this stack.
++# The fixed uid (`prometheus`) is what the provisioned dashboard references,
++# so the dashboard binds to this datasource automatically on first start.
++
++apiVersion: 1
++
++datasources:
++  - name: Prometheus
++    uid: prometheus
++    type: prometheus
++    access: proxy
++    url: http://prometheus:9090
++    isDefault: true
++    editable: false
++    jsonData:
++      timeInterval: 15s
+diff --git a/infra/monitoring/prometheus/prometheus.yml b/infra/monitoring/prometheus/prometheus.yml
+new file mode 100644
+index 0000000..f3c2692
+--- /dev/null
++++ b/infra/monitoring/prometheus/prometheus.yml
+@@ -0,0 +1,26 @@
++# Prometheus scrape configuration · Server C (observability)
++#
++# Scrapes the Inference API's /metrics endpoint. In the local compose stack the
++# API is reachable as `api-inference:8000` on the shared network. On a dedicated
++# Server C, point the target at Server A's address/port instead (or edit it via
++# the API_METRICS_TARGET note in infra/monitoring/README.md).
++
++global:
++  scrape_interval: 15s
++  evaluation_interval: 15s
++  external_labels:
++    monitor: diabetes-mlops
++
++scrape_configs:
++  # The service under observation.
++  - job_name: diabetes-api
++    metrics_path: /metrics
++    static_configs:
++      - targets: ["api-inference:8000"]
++        labels:
++          service: api-inference
++
++  # Prometheus scraping itself (useful to confirm the stack is alive).
++  - job_name: prometheus
++    static_configs:
++      - targets: ["localhost:9090"]
+-- 
+2.43.0
+
+
+From 2c32afd47f151f139aef9f7ca52433e6fdd15579 Mon Sep 17 00:00:00 2001
+From: aristotekean <correo.ammp@gmail.com>
+Date: Sun, 25 Oct 2026 17:32:00 +0000
+Subject: [PATCH 2/2] feat(monitoring): connect Server C to the tailnet via a
+ Tailscale sidecar
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Server C (observabilidad) se une a la red Tailscale (aristotekean.github) y
+alcanza la API de Server A sobre la tailnet, no por la red local de Docker:
+
+- docker-compose.tailscale.yml: sidecar tailscale/tailscale con Prometheus y
+  Grafana compartiendo su namespace de red (network_mode: service:tailscale);
+  Server C aparece como un nodo "monitoring" en la tailnet
+- Prometheus usa file_sd (prometheus/targets/api-targets.yml) para fijar el
+  target de la API por entorno sin tocar la config (api-inference:8000 en local,
+  server-a:8000 sobre la tailnet); recarga automática
+- datasource de Grafana con URL por variable de entorno (PROMETHEUS_URL), para
+  servir en ambos modos (prometheus:9090 en red Docker, localhost:9090 en netns
+  compartido)
+- .env.example con TS_AUTHKEY, TS_HOSTNAME y demás variables
+- README con el despliegue en Server C vía Tailscale
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HREX9gonv5UPepAoepCinV
+---
+ infra/monitoring/.env.example                 |  22 ++++
+ infra/monitoring/README.md                    |  61 ++++++---
+ infra/monitoring/docker-compose.tailscale.yml | 119 ++++++++++++++++++
+ infra/monitoring/docker-compose.yml           |   4 +
+ .../provisioning/datasources/datasource.yml   |   6 +-
+ infra/monitoring/prometheus/prometheus.yml    |  14 ++-
+ .../prometheus/targets/api-targets.yml        |  15 +++
+ 7 files changed, 219 insertions(+), 22 deletions(-)
+ create mode 100644 infra/monitoring/.env.example
+ create mode 100644 infra/monitoring/docker-compose.tailscale.yml
+ create mode 100644 infra/monitoring/prometheus/targets/api-targets.yml
+
+diff --git a/infra/monitoring/.env.example b/infra/monitoring/.env.example
+new file mode 100644
+index 0000000..002645a
+--- /dev/null
++++ b/infra/monitoring/.env.example
+@@ -0,0 +1,22 @@
++# infra/monitoring · environment for the Tailscale-connected stack (Server C).
++# Copy to .env and fill in before `docker compose -f docker-compose.tailscale.yml up -d`.
++
++# --- Tailscale (required for docker-compose.tailscale.yml) ------------------
++# Auth key from the Tailscale admin console: Settings -> Keys -> Generate.
++# Reusable or ephemeral both work; a tag is optional (see TS_EXTRA_ARGS).
++TS_AUTHKEY=tskey-auth-xxxxxxxxxxxx
++
++# Tailnet node name for Server C (reachable as http://<TS_HOSTNAME>:3000).
++TS_HOSTNAME=monitoring
++
++# Extra flags for `tailscale up`, e.g. advertise an ACL tag:
++# TS_EXTRA_ARGS=--advertise-tags=tag:monitoring
++
++# --- Ports / retention ------------------------------------------------------
++GRAFANA_PORT=3000
++PROMETHEUS_PORT=9090
++PROMETHEUS_RETENTION=15d
++
++# --- Grafana admin ----------------------------------------------------------
++GRAFANA_ADMIN_USER=admin
++GRAFANA_ADMIN_PASSWORD=admin
+diff --git a/infra/monitoring/README.md b/infra/monitoring/README.md
+index e17cff9..aed5f3d 100644
+--- a/infra/monitoring/README.md
++++ b/infra/monitoring/README.md
+@@ -54,24 +54,49 @@ Para ver datos: generar tráfico contra la API (`/health`, `/predict`) o lanzar
+ Locust (`docker compose --profile loadtest up -d`, ver `infra/load-testing`) y
+ observar cómo cambian los paneles durante la prueba de carga.
+ 
+-## Despliegue en un Server C dedicado
+-
+-Cuando el monitoreo corre en una máquina aparte del clúster, se ejecuta este
+-compose por su cuenta y se apunta Prometheus a la API del Server A editando el
+-target en [`prometheus/prometheus.yml`](prometheus/prometheus.yml):
+-
+-```yaml
+-scrape_configs:
+-  - job_name: diabetes-api
+-    metrics_path: /metrics
+-    static_configs:
+-      - targets: ["<SERVER_A>:<PUERTO_API>"]
++## Despliegue en un Server C dedicado (Tailscale)
++
++En la arquitectura de la plataforma los tres servidores se conectan por una red
++**Tailscale** (tailnet `aristotekean.github`). El monitoreo vive en **Server C**
++y alcanza la API de Server A **a través de la tailnet**, no por la red local de
++Docker.
++
++El archivo [`docker-compose.tailscale.yml`](docker-compose.tailscale.yml) añade
++un *sidecar* de Tailscale. Prometheus y Grafana comparten su namespace de red
++(`network_mode: service:tailscale`), así que Server C aparece en la tailnet como
++un único nodo (`monitoring`):
++
+ ```
++Server A (API) ─┐
++                ├─ Tailscale ─► [ Server C: ts sidecar ⇄ Prometheus + Grafana ]
++Server B ───────┘
++```
++
++Pasos en Server C:
+ 
+ ```bash
+-docker compose -f docker-compose.yml up -d
++cd infra/monitoring
++cp .env.example .env            # y poner TS_AUTHKEY (admin de Tailscale → Keys)
++# apuntar el scrape a Server A en la tailnet:
++#   prometheus/targets/api-targets.yml  ->  - targets: ["server-a:8000"]
++docker compose -f docker-compose.tailscale.yml up -d
+ ```
+ 
++Acceso desde cualquier equipo de la tailnet:
++
++| Servicio | URL en la tailnet |
++|----------|-------------------|
++| Grafana | <http://monitoring:3000> (`admin` / `admin`) |
++| Prometheus | <http://monitoring:9090> |
++
++Los puertos también se publican en el host (en el sidecar) para depuración
++local. El scrape target se cambia sin reiniciar: Prometheus recarga
++`prometheus/targets/api-targets.yml` automáticamente (`file_sd`).
++
++> Variables de Tailscale (en `infra/monitoring/.env`): `TS_AUTHKEY` (requerida),
++> `TS_HOSTNAME` (nombre del nodo, default `monitoring`), `TS_EXTRA_ARGS`
++> (p. ej. `--advertise-tags=tag:monitoring`).
++
+ ## Variables de entorno (opcionales)
+ 
+ | Variable | Default | Descripción |
+@@ -86,12 +111,16 @@ docker compose -f docker-compose.yml up -d
+ 
+ ```
+ infra/monitoring/
+-├── docker-compose.yml                    S8 Prometheus + S9 Grafana
++├── docker-compose.yml                    S8 Prometheus + S9 Grafana (red Docker)
++├── docker-compose.tailscale.yml          Server C: sidecar Tailscale + S8 + S9
++├── .env.example                          variables (TS_AUTHKEY, puertos, admin)
+ ├── prometheus/
+-│   └── prometheus.yml                    configuración de scrape
++│   ├── prometheus.yml                    configuración de scrape (file_sd)
++│   └── targets/
++│       └── api-targets.yml               target de la API (editable por entorno)
+ └── grafana/
+     ├── provisioning/
+-    │   ├── datasources/datasource.yml    Prometheus (uid: prometheus)
++    │   ├── datasources/datasource.yml    Prometheus (uid: prometheus, URL por env)
+     │   └── dashboards/dashboards.yml      provider de dashboards
+     └── dashboards/
+         └── diabetes-api.json              dashboard principal
+diff --git a/infra/monitoring/docker-compose.tailscale.yml b/infra/monitoring/docker-compose.tailscale.yml
+new file mode 100644
+index 0000000..013c985
+--- /dev/null
++++ b/infra/monitoring/docker-compose.tailscale.yml
+@@ -0,0 +1,119 @@
++# Diabetes MLOps · observability on a dedicated Server C, joined to Tailscale
++#
++#   [tailnet: aristotekean.github]
++#        Server A (cluster + API) ──┐
++#                                   ├── Tailscale ──┐
++#        Server B (Locust) ─────────┘               │
++#                                                    ▼
++#        Server C ── ts sidecar ◀─shared netns─ S8 Prometheus + S9 Grafana
++#
++# Prometheus and Grafana share the Tailscale sidecar's network namespace
++# (network_mode: service:tailscale), so Server C appears on the tailnet as a
++# single node (hostname "monitoring") and Prometheus scrapes the API over the
++# tailnet. Grafana reaches Prometheus on localhost (same namespace).
++#
++# Prerequisites
++#   1. A Tailscale auth key (admin console → Settings → Keys; reusable or
++#      ephemeral, tag optional). Put it in infra/monitoring/.env as TS_AUTHKEY.
++#   2. Point the scrape target at Server A's tailnet name in
++#      prometheus/targets/api-targets.yml, e.g.  - targets: ["server-a:8000"]
++#
++# Run (from infra/monitoring, on Server C):
++#   cp .env.example .env     # then set TS_AUTHKEY
++#   docker compose -f docker-compose.tailscale.yml up -d
++#
++# Access over the tailnet (any device signed in to aristotekean.github):
++#   Grafana     http://monitoring:3000   (admin / admin)
++#   Prometheus  http://monitoring:9090
++# Host ports are also published on the sidecar for local debugging.
++
++name: diabetes-monitoring
++
++services:
++  # ------------------------------------------------------------------------- #
++  # Tailscale sidecar · owns the network namespace shared by S8 and S9.
++  # ------------------------------------------------------------------------- #
++  tailscale:
++    image: tailscale/tailscale:v1.78.1
++    container_name: diabetes-ts-monitoring
++    hostname: ${TS_HOSTNAME:-monitoring}
++    environment:
++      TS_AUTHKEY: ${TS_AUTHKEY:?set TS_AUTHKEY in infra/monitoring/.env (Tailscale admin -> Keys)}
++      TS_STATE_DIR: /var/lib/tailscale
++      TS_USERSPACE: "false"
++      TS_ACCEPT_DNS: "true"
++      # e.g. --advertise-tags=tag:monitoring  (requires matching ACL tags)
++      TS_EXTRA_ARGS: ${TS_EXTRA_ARGS:-}
++    volumes:
++      - tailscale-state:/var/lib/tailscale
++    devices:
++      - /dev/net/tun:/dev/net/tun
++    cap_add:
++      - NET_ADMIN
++    ports:
++      # Published on the sidecar (the namespace owner) so S8/S9 are also
++      # reachable from the host, not only over the tailnet.
++      - "${GRAFANA_PORT:-3000}:3000"
++      - "${PROMETHEUS_PORT:-9090}:9090"
++    healthcheck:
++      test: ["CMD", "tailscale", "status"]
++      interval: 15s
++      timeout: 5s
++      retries: 10
++      start_period: 20s
++    restart: unless-stopped
++
++  # ------------------------------------------------------------------------- #
++  # S8 · Prometheus (shares the tailscale namespace)
++  # ------------------------------------------------------------------------- #
++  prometheus:
++    image: prom/prometheus:v3.1.0
++    container_name: diabetes-prometheus
++    command:
++      - --config.file=/etc/prometheus/prometheus.yml
++      - --storage.tsdb.path=/prometheus
++      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-15d}
++      - --web.enable-lifecycle
++    network_mode: service:tailscale
++    volumes:
++      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
++      - ./prometheus/targets:/etc/prometheus/targets:ro
++      - prometheus-data:/prometheus
++    depends_on:
++      tailscale:
++        condition: service_healthy
++    restart: unless-stopped
++
++  # ------------------------------------------------------------------------- #
++  # S9 · Grafana (shares the tailscale namespace; Prometheus on localhost)
++  # ------------------------------------------------------------------------- #
++  grafana:
++    image: grafana/grafana:11.4.0
++    container_name: diabetes-grafana
++    environment:
++      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
++      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
++      GF_USERS_ALLOW_SIGN_UP: "false"
++      # Same network namespace as Prometheus → reach it on localhost.
++      PROMETHEUS_URL: http://localhost:9090
++      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/diabetes-api.json
++      # The tailnet hostname Grafana is served under (cookies / redirects).
++      GF_SERVER_ROOT_URL: ${GF_SERVER_ROOT_URL:-http://%(domain)s:3000}
++      GF_SERVER_DOMAIN: ${TS_HOSTNAME:-monitoring}
++    network_mode: service:tailscale
++    volumes:
++      - ./grafana/provisioning:/etc/grafana/provisioning:ro
++      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
++      - grafana-data:/var/lib/grafana
++    depends_on:
++      tailscale:
++        condition: service_healthy
++    restart: unless-stopped
++
++volumes:
++  tailscale-state:
++    name: diabetes_tailscale_monitoring
++  prometheus-data:
++    name: diabetes_prometheus_ts
++  grafana-data:
++    name: diabetes_grafana_ts
+diff --git a/infra/monitoring/docker-compose.yml b/infra/monitoring/docker-compose.yml
+index 858b442..1fc880b 100644
+--- a/infra/monitoring/docker-compose.yml
++++ b/infra/monitoring/docker-compose.yml
+@@ -36,6 +36,7 @@ services:
+       - "${PROMETHEUS_PORT:-9090}:9090"
+     volumes:
+       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
++      - ./prometheus/targets:/etc/prometheus/targets:ro
+       - prometheus-data:/prometheus
+     healthcheck:
+       test: ["CMD", "wget", "--spider", "-q", "http://localhost:9090/-/healthy"]
+@@ -59,6 +60,9 @@ services:
+       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+       GF_USERS_ALLOW_SIGN_UP: "false"
++      # Datasource URL used by the provisioned datasource. Separate containers
++      # on the compose network reach Prometheus by its service name.
++      PROMETHEUS_URL: http://prometheus:9090
+       # Land on the provisioned dashboard straight away.
+       GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/diabetes-api.json
+     ports:
+diff --git a/infra/monitoring/grafana/provisioning/datasources/datasource.yml b/infra/monitoring/grafana/provisioning/datasources/datasource.yml
+index 978828d..430eae6 100644
+--- a/infra/monitoring/grafana/provisioning/datasources/datasource.yml
++++ b/infra/monitoring/grafana/provisioning/datasources/datasource.yml
+@@ -9,7 +9,11 @@ datasources:
+     uid: prometheus
+     type: prometheus
+     access: proxy
+-    url: http://prometheus:9090
++    # Env-driven so the same provisioning works in both modes (Grafana expands
++    # environment variables in provisioning files):
++    #   base compose          -> http://prometheus:9090   (separate containers)
++    #   tailscale sidecar mode -> http://localhost:9090    (shared net namespace)
++    url: $PROMETHEUS_URL
+     isDefault: true
+     editable: false
+     jsonData:
+diff --git a/infra/monitoring/prometheus/prometheus.yml b/infra/monitoring/prometheus/prometheus.yml
+index f3c2692..96c914a 100644
+--- a/infra/monitoring/prometheus/prometheus.yml
++++ b/infra/monitoring/prometheus/prometheus.yml
+@@ -12,15 +12,19 @@ global:
+     monitor: diabetes-mlops
+ 
+ scrape_configs:
+-  # The service under observation.
++  # The service under observation. The target lives in a separate file
++  # (prometheus/targets/api-targets.yml) so it can be changed per deployment
++  # without editing this config: `api-inference:8000` on the local compose
++  # network, or Server A's tailnet name (e.g. server-a:8000) from a dedicated
++  # Server C joined to Tailscale. file_sd reloads the target automatically.
+   - job_name: diabetes-api
+     metrics_path: /metrics
+-    static_configs:
+-      - targets: ["api-inference:8000"]
+-        labels:
+-          service: api-inference
++    file_sd_configs:
++      - files: ["/etc/prometheus/targets/*.yml"]
+ 
+   # Prometheus scraping itself (useful to confirm the stack is alive).
++  # localhost works in both modes: on its own network, and when it shares the
++  # Tailscale sidecar's network namespace.
+   - job_name: prometheus
+     static_configs:
+       - targets: ["localhost:9090"]
+diff --git a/infra/monitoring/prometheus/targets/api-targets.yml b/infra/monitoring/prometheus/targets/api-targets.yml
+new file mode 100644
+index 0000000..975b1a0
+--- /dev/null
++++ b/infra/monitoring/prometheus/targets/api-targets.yml
+@@ -0,0 +1,15 @@
++# Scrape target for the Inference API (file_sd for job `diabetes-api`).
++#
++# Local compose network (root docker-compose.yml): the Docker service name.
++#   - targets: ["api-inference:8000"]
++#
++# Dedicated Server C joined to Tailscale (docker-compose.tailscale.yml): the
++# tailnet name of the node that runs the API on Server A, e.g.
++#   - targets: ["server-a:8000"]            # MagicDNS short name
++#   - targets: ["api.<tailnet>.ts.net:8000"]
++#
++# Prometheus reloads this file automatically; no restart needed after editing.
++
++- targets: ["api-inference:8000"]
++  labels:
++    service: api-inference
+-- 
+2.43.0
+
