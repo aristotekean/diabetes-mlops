@@ -1,0 +1,7 @@
+# Python dependencies for the training DAGs.
+# mlflow is pinned to the server version in docker-compose.yml (ghcr.io/mlflow/mlflow).
+# scikit-learn must match the version used by api-inference so the serialised
+# model deserialises with identical code.
+mlflow==3.16.1
+scikit-learn==1.9.1
+pandas>=2.2,<3

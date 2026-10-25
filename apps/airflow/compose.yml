@@ -1,0 +1,188 @@
+# Diabetes MLOps · Airflow slice (S5 + S6)
+#
+# Included by the root docker-compose.yml. Paths are relative to this file.
+#
+#   S5 postgres-train  PostgreSQL  <--->  S6 Airflow   (training data read by the DAGs)
+#   S6 Airflow                     --->   S2 MLflow    (logs runs, registers the model)
+#
+# Two isolated Postgres instances, each with its own volume:
+#   - airflow-db      : Airflow metadata only (internal, not published to the host)
+#   - postgres-train  : training database read by the DAGs
+#
+# Standalone (Airflow only, from the repository root):
+#   docker compose -f apps/airflow/compose.yml up -d --build
+
+x-airflow-common: &airflow-common
+  image: ${DOCKERHUB_USER:-aristotekean}/diabetes-airflow:0.1.0
+  build:
+    context: ../..
+    dockerfile: apps/airflow/Dockerfile
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-db:5432/airflow
+    AIRFLOW__CORE__FERNET_KEY: ""
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-apiserver:8080/execution/
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET:-change-me-jwt-secret}
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
+    # S5 · training database the DAGs read from
+    TRAIN_DB_HOST: postgres-train
+    TRAIN_DB_PORT: "5432"
+    TRAIN_DB_NAME: diabetes
+    TRAIN_DB_USER: app
+    TRAIN_DB_PASSWORD: app
+    # S2 · MLflow tracking server (artifacts proxied by the server)
+    MLFLOW_TRACKING_URI: http://mlflow:5000
+    MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+    AWS_ACCESS_KEY_ID: minioadmin
+    AWS_SECRET_ACCESS_KEY: minioadmin
+    MODEL_NAME: diabetes
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./logs:/opt/airflow/logs
+    - ./plugins:/opt/airflow/plugins
+    - ./config:/opt/airflow/config
+  user: "50000:0"
+  depends_on: &airflow-common-depends-on
+    airflow-db:
+      condition: service_healthy
+    postgres-train:
+      condition: service_healthy
+
+services:
+  # ------------------------------------------------------------------------- #
+  # S5 · PostgreSQL (training database)
+  # ------------------------------------------------------------------------- #
+  postgres-train:
+    image: postgres:16
+    container_name: diabetes-postgres-train
+    environment:
+      POSTGRES_DB: diabetes
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-train-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD", "pg_isready", "-U", "app", "-d", "diabetes" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------------- #
+  # Airflow metadata database (internal to the stack, separate volume)
+  # ------------------------------------------------------------------------- #
+  airflow-db:
+    image: postgres:16
+    container_name: diabetes-airflow-db
+    environment:
+      POSTGRES_DB: airflow
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+    volumes:
+      - airflow-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD", "pg_isready", "-U", "airflow", "-d", "airflow" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------------- #
+  # S6 · Airflow (LocalExecutor: api-server + scheduler + dag-processor + triggerer)
+  # ------------------------------------------------------------------------- #
+  airflow-init:
+    <<: *airflow-common
+    container_name: diabetes-airflow-init
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        mkdir -p /opt/airflow/{logs,dags,plugins,config}
+        chown -R "50000:0" /opt/airflow/{logs,dags,plugins,config}
+        exec /entrypoint airflow version
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_DB_MIGRATE: "true"
+      _AIRFLOW_WWW_USER_CREATE: "true"
+      _AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_ADMIN_USER:-airflow}
+      _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:-airflow}
+    user: "0:0"
+
+  airflow-apiserver:
+    <<: *airflow-common
+    container_name: diabetes-airflow-apiserver
+    command: api-server
+    ports:
+      - "${AIRFLOW_PORT:-8080}:8080"
+    healthcheck:
+      test: [ "CMD", "curl", "--fail", "http://localhost:8080/api/v2/monitor/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: diabetes-airflow-scheduler
+    command: scheduler
+    healthcheck:
+      test: [ "CMD-SHELL", 'airflow jobs check --job-type SchedulerJob --hostname "$${HOSTNAME}"' ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    container_name: diabetes-airflow-dag-processor
+    command: dag-processor
+    healthcheck:
+      test: [ "CMD-SHELL", 'airflow jobs check --job-type DagProcessorJob --hostname "$${HOSTNAME}"' ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-triggerer:
+    <<: *airflow-common
+    container_name: diabetes-airflow-triggerer
+    command: triggerer
+    healthcheck:
+      test: [ "CMD-SHELL", 'airflow jobs check --job-type TriggererJob --hostname "$${HOSTNAME}"' ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+volumes:
+  postgres-train-data:
+    name: diabetes_postgres_train
+  airflow-db-data:
+    name: diabetes_airflow_db
