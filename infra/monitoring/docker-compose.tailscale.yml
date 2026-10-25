@@ -1,0 +1,119 @@
+# Diabetes MLOps · observability on a dedicated Server C, joined to Tailscale
+#
+#   [tailnet: aristotekean.github]
+#        Server A (cluster + API) ──┐
+#                                   ├── Tailscale ──┐
+#        Server B (Locust) ─────────┘               │
+#                                                    ▼
+#        Server C ── ts sidecar ◀─shared netns─ S8 Prometheus + S9 Grafana
+#
+# Prometheus and Grafana share the Tailscale sidecar's network namespace
+# (network_mode: service:tailscale), so Server C appears on the tailnet as a
+# single node (hostname "monitoring") and Prometheus scrapes the API over the
+# tailnet. Grafana reaches Prometheus on localhost (same namespace).
+#
+# Prerequisites
+#   1. A Tailscale auth key (admin console → Settings → Keys; reusable or
+#      ephemeral, tag optional). Put it in infra/monitoring/.env as TS_AUTHKEY.
+#   2. Point the scrape target at Server A's tailnet name in
+#      prometheus/targets/api-targets.yml, e.g.  - targets: ["server-a:8000"]
+#
+# Run (from infra/monitoring, on Server C):
+#   cp .env.example .env     # then set TS_AUTHKEY
+#   docker compose -f docker-compose.tailscale.yml up -d
+#
+# Access over the tailnet (any device signed in to aristotekean.github):
+#   Grafana     http://monitoring:3000   (admin / admin)
+#   Prometheus  http://monitoring:9090
+# Host ports are also published on the sidecar for local debugging.
+
+name: diabetes-monitoring
+
+services:
+  # ------------------------------------------------------------------------- #
+  # Tailscale sidecar · owns the network namespace shared by S8 and S9.
+  # ------------------------------------------------------------------------- #
+  tailscale:
+    image: tailscale/tailscale:v1.78.1
+    container_name: diabetes-ts-monitoring
+    hostname: ${TS_HOSTNAME:-monitoring}
+    environment:
+      TS_AUTHKEY: ${TS_AUTHKEY:?set TS_AUTHKEY in infra/monitoring/.env (Tailscale admin -> Keys)}
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_USERSPACE: "false"
+      TS_ACCEPT_DNS: "true"
+      # e.g. --advertise-tags=tag:monitoring  (requires matching ACL tags)
+      TS_EXTRA_ARGS: ${TS_EXTRA_ARGS:-}
+    volumes:
+      - tailscale-state:/var/lib/tailscale
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - NET_ADMIN
+    ports:
+      # Published on the sidecar (the namespace owner) so S8/S9 are also
+      # reachable from the host, not only over the tailnet.
+      - "${GRAFANA_PORT:-3000}:3000"
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    healthcheck:
+      test: ["CMD", "tailscale", "status"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------------- #
+  # S8 · Prometheus (shares the tailscale namespace)
+  # ------------------------------------------------------------------------- #
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    container_name: diabetes-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-15d}
+      - --web.enable-lifecycle
+    network_mode: service:tailscale
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/targets:/etc/prometheus/targets:ro
+      - prometheus-data:/prometheus
+    depends_on:
+      tailscale:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------------- #
+  # S9 · Grafana (shares the tailscale namespace; Prometheus on localhost)
+  # ------------------------------------------------------------------------- #
+  grafana:
+    image: grafana/grafana:11.4.0
+    container_name: diabetes-grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      # Same network namespace as Prometheus → reach it on localhost.
+      PROMETHEUS_URL: http://localhost:9090
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/diabetes-api.json
+      # The tailnet hostname Grafana is served under (cookies / redirects).
+      GF_SERVER_ROOT_URL: ${GF_SERVER_ROOT_URL:-http://%(domain)s:3000}
+      GF_SERVER_DOMAIN: ${TS_HOSTNAME:-monitoring}
+    network_mode: service:tailscale
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      tailscale:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  tailscale-state:
+    name: diabetes_tailscale_monitoring
+  prometheus-data:
+    name: diabetes_prometheus_ts
+  grafana-data:
+    name: diabetes_grafana_ts
