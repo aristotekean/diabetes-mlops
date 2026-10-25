@@ -1,0 +1,9 @@
+.git
+.venv
+**/.venv
+**/__pycache__
+**/.pytest_cache
+data
+apps/airflow/logs
+infra/load-testing/results
+**/.DS_Store

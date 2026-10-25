@@ -33,23 +33,33 @@ x-airflow-common: &airflow-common
     TRAIN_DB_NAME: diabetes
     TRAIN_DB_USER: app
     TRAIN_DB_PASSWORD: app
+    DIABETES_DATASET_PATH: /opt/airflow/data/Diabetes/Diabetes.csv
+    DIABETES_SOURCE_URI: https://docs.google.com/uc?export=download&confirm=t&id=1k5-1caezQ3zWJbKaiMULTGq-3sz6uThC
     # S2 · MLflow tracking server (artifacts proxied by the server)
     MLFLOW_TRACKING_URI: http://mlflow:5000
+    MLFLOW_EXPERIMENT_NAME: diabetes-readmission
     MLFLOW_S3_ENDPOINT_URL: http://minio:9000
     AWS_ACCESS_KEY_ID: minioadmin
     AWS_SECRET_ACCESS_KEY: minioadmin
     MODEL_NAME: diabetes
+    MODEL_ALIAS: production
+    # Each run loads the next RAW batch, so a short interval replays the
+    # incremental arrival of the 7 batches in about an hour.
+    DIABETES_TRAINING_SCHEDULE: "*/10 * * * *"
   volumes:
     - ./dags:/opt/airflow/dags
     - ./logs:/opt/airflow/logs
     - ./plugins:/opt/airflow/plugins
     - ./config:/opt/airflow/config
+    - ../../data/Diabetes:/opt/airflow/data/Diabetes
   user: "50000:0"
   depends_on: &airflow-common-depends-on
     airflow-db:
       condition: service_healthy
     postgres-train:
       condition: service_healthy
+    train-db-migrate:
+      condition: service_completed_successfully
 
 services:
   # ------------------------------------------------------------------------- #
@@ -73,6 +83,24 @@ services:
       retries: 5
       start_period: 5s
     restart: unless-stopped
+
+  # One-shot: applies pending infra/database/migrations (RAW, CLEAN and
+  # INFERENCE schemas) before any DAG can touch the training database.
+  train-db-migrate:
+    image: postgres:16
+    container_name: diabetes-train-db-migrate
+    entrypoint: [ "sh", "/database/migrate.sh" ]
+    environment:
+      PGHOST: postgres-train
+      PGPORT: "5432"
+      PGDATABASE: diabetes
+      PGUSER: app
+      PGPASSWORD: app
+    volumes:
+      - ../../infra/database:/database:ro
+    depends_on:
+      postgres-train:
+        condition: service_healthy
 
   # ------------------------------------------------------------------------- #
   # Airflow metadata database (internal to the stack, separate volume)
