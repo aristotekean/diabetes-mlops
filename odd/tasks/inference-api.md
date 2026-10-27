@@ -41,7 +41,7 @@ production version without code changes.
   update `.python-version`, `pyproject`, Dockerfile images (record the reason).
 
 ## Tasks
-- [ ] T1 — deps + settings + model loader (`model.py`), `/health`, `/model-info`,
+- [x] T1 — deps + settings + model loader (`model.py`), `/health`, `/model-info`,
   `POST /model/reload`; lifespan with startup load and background refresh. Tests
   with a fake registry/loader. Route: delegated (writer trigger, 2+ files).
 - [ ] T2 — `/predict`: pydantic schemas (44 fields, identifiers rejected),
@@ -62,4 +62,25 @@ production version without code changes.
 Strategy: `ask-on-risk`. Forecast ~700 authored changed lines (excluding `uv.lock`).
 
 ## Progress / evidence
-(pending)
+
+### Python version
+Python 3.15 was tried first (`uv lock` resolved) but `uv sync` had to build
+`pyarrow==25.0.1` (pulled by mlflow) and `pandas==2.3.3` (pinned `<3` by
+`ml/diabetes_model`) from source; the pyarrow CMake build failed. Per the design
+decision the app moved to **CPython 3.14** (`.python-version` = `3.14`,
+`requires-python >=3.14`, Dockerfile images `uv:python3.14-trixie-slim` /
+`python:3.14-slim-trixie`). On 3.14.7 every dependency installs from wheels
+(sklearn 1.9.1, numpy 2.5.4, pandas 2.3.3, mlflow 3.16.1, skops 0.16.0,
+psycopg 3.3.6, pyarrow 25.0.1).
+
+### T1 — model service + ops routes (route: delegated writer)
+- Re-slice: `repository.py` (protocol + `PostgresInferenceLogRepository`) landed
+  in T1 instead of T2 because the lifespan/`/health` already need the pool; T2
+  wires `/predict` to it.
+- RED: `uv run pytest -q` → `ImportError: cannot import name 'create_app'`.
+- GREEN: `uv run pytest -q` → `11 passed`.
+- `uv lock --check` → `Resolved 106 packages` (lock up to date).
+- `uv run python -c "import api_inference.main"` → import ok (DSN resolved lazily
+  in `open()`, so import needs no DB env).
+- Commit: see `git log` entry `feat(api-inference): add model service, settings
+  and health/model-info/reload routes`.
