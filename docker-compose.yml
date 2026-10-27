@@ -17,7 +17,10 @@
 #   docker compose --profile loadtest up -d     # see infra/load-testing
 #
 # The API serves the model registered in MLflow under the `production` alias.
-# Until a training DAG registers one, the API exits and restarts.
+# Until a training DAG registers one, the API starts in `unavailable` state
+# (`/predict` answers 503) and keeps polling the registry every
+# MODEL_REFRESH_SECONDS; every request is logged to inference.logs on
+# postgres-train.
 
 name: diabetes
 
@@ -172,6 +175,15 @@ services:
       MODEL_NAME: diabetes
       # Registry alias resolved at startup: models:/<MODEL_NAME>@<MODEL_ALIAS>
       MODEL_ALIAS: production
+      # Background poll of the alias; a new production version is picked up
+      # without restarting the container (0 disables it).
+      MODEL_REFRESH_SECONDS: 60
+      # inference.logs lives in the training database (S5).
+      TRAIN_DB_HOST: postgres-train
+      TRAIN_DB_PORT: 5432
+      TRAIN_DB_NAME: diabetes
+      TRAIN_DB_USER: app
+      TRAIN_DB_PASSWORD: app
     deploy:
       resources:
         limits:
@@ -180,6 +192,10 @@ services:
     depends_on:
       mlflow:
         condition: service_healthy
+      postgres-train:
+        condition: service_healthy
+      train-db-migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   # ------------------------------------------------------------------------- #
