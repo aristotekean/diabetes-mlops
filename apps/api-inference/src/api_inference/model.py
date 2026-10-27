@@ -13,6 +13,8 @@ from typing import Any
 
 from diabetes_model.contract import TARGET_CLASSES, input_frame
 
+from api_inference.metrics import MODEL_RELOADS, set_model_info
+
 logger = logging.getLogger(__name__)
 
 
@@ -170,9 +172,11 @@ class ModelService:
             target = await asyncio.to_thread(self._resolve_version, self.name, self.alias)
         except ModelLoadError as exc:
             self.last_error = str(exc)
+            MODEL_RELOADS.labels(result="failure").inc()
             raise
         except Exception as exc:
             self.last_error = str(exc)
+            MODEL_RELOADS.labels(result="failure").inc()
             raise ModelLoadError(str(exc)) from exc
         finally:
             self.last_check_at = datetime.now(UTC)
@@ -189,9 +193,11 @@ class ModelService:
             model = await asyncio.to_thread(self._load_model, uri)
         except ModelLoadError as exc:
             self.last_error = str(exc)
+            MODEL_RELOADS.labels(result="failure").inc()
             raise
         except Exception as exc:
             self.last_error = str(exc)
+            MODEL_RELOADS.labels(result="failure").inc()
             raise ModelLoadError(f"cannot load {uri}: {exc}") from exc
         loaded = LoadedModel(
             model=model,
@@ -205,6 +211,8 @@ class ModelService:
         previous = self.loaded
         self.loaded = loaded  # atomic reference swap
         self.last_error = None
+        set_model_info(loaded.name, loaded.version, loaded.alias)
+        MODEL_RELOADS.labels(result="success").inc()
         logger.info(
             "model loaded: %s (previous=%s) in %.0f ms",
             uri, previous.version if previous else None, (time.perf_counter() - started) * 1000,

@@ -47,7 +47,7 @@ production version without code changes.
 - [x] T2 — `/predict`: pydantic schemas (44 fields, identifiers rejected),
   `asyncio.to_thread` inference, `inference.logs` repository (async pool), row for
   success and failure, `request_id` echo. Tests with fake repository. Route: delegated.
-- [ ] T3 — metrics middleware + `/metrics`; counters/histogram/gauge; tests. Route: delegated.
+- [x] T3 — metrics middleware + `/metrics`; counters/histogram/gauge; tests. Route: delegated.
 - [ ] T4 — compose wiring for the API (train DB env, `depends_on` postgres-train /
   train-db-migrate), Dockerfile install of `ml/diabetes_model`, API README (es)
   explaining the loading strategy. Route: delegated (same writer).
@@ -94,4 +94,20 @@ psycopg 3.3.6, pyarrow 25.0.1).
 - `processing_time_ms` covers normalisation + inference, not the DB write.
 - RED: `uv run pytest -q` → `18 failed, 11 passed` (all T2 tests failing).
 - GREEN: `uv run pytest -q` → `29 passed`.
+- `uv lock --check` → `Resolved 106 packages`; `import api_inference.main` → ok.
+- Commit: `0dd6217` `feat(api-inference): add POST /predict with contract
+  validation and inference logging`.
+
+### T3 — Prometheus metrics (route: delegated writer)
+- `metrics.py`: pure-ASGI `MetricsMiddleware` labelled by route template
+  (`scope["route"].path`); unmatched requests use the constant label
+  `unmatched` instead of the raw path (deviation from the brief, chosen to keep
+  cardinality bounded under path scanning). `/metrics` is not self-counted.
+  Metrics: `http_requests_total`, `http_request_duration_seconds` (ms buckets),
+  `http_requests_in_progress`, `predictions_total{status}`,
+  `prediction_duration_seconds`, `inference_log_failures_total`,
+  `model_info{name,version,alias}` (reset on reload), `model_reloads_total{result}`
+  plus the default process/platform collectors.
+- RED: `uv run pytest -q` → `7 failed, 29 passed`.
+- GREEN: `uv run pytest -q` → `36 passed`.
 - `uv lock --check` → `Resolved 106 packages`; `import api_inference.main` → ok.
