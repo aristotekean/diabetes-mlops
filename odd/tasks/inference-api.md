@@ -149,3 +149,11 @@ Human decision: push / PR strategy. Not covered by tests: a live run against
 MLflow + postgres-train (`docker compose up -d api-inference` then
 `POST /predict` with the contract example) — run once a training DAG has
 registered `diabetes@production`.
+
+### Parent spot check and native review (2026-10-27)
+- Parent re-ran `uv run pytest -q` → `36 passed`; working tree clean; 5 commits on
+  the branch (`9789da9` doc, `30b8853`, `0dd6217`, `c6a1a3f`, `cf7edb8`).
+- `gentle-ai review assess --base-ref c307ea9 --committed-only` → tier `medium`
+  (`executable_change` on `.python-version`), `review_due: false`,
+  `review_due_reason: under_budget` → slice stays pending; reviewed boundary
+  remains `c307ea9`. No review ceremony started.
