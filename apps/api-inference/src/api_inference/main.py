@@ -9,9 +9,11 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 
-from fastapi import FastAPI, HTTPException, Request, status
+from fastapi import FastAPI, HTTPException, status
+from fastapi.exceptions import RequestValidationError
 
 from api_inference.model import ModelLoadError, ModelService
+from api_inference.predict import build_router, build_validation_handler
 from api_inference.repository import InferenceLogRepository, PostgresInferenceLogRepository
 from api_inference.schemas import ErrorDetail, HealthResponse, ModelInfoResponse, ReloadResponse
 from api_inference.settings import Settings, get_settings
@@ -113,6 +115,8 @@ def create_app(
     app.state.settings = settings
     app.state.model_service = service
     app.state.repository = repo
+    app.include_router(build_router(service, repo))
+    app.add_exception_handler(RequestValidationError, build_validation_handler(repo))
 
     @app.get("/health", response_model=HealthResponse, tags=["ops"])
     async def health() -> HealthResponse:

@@ -44,7 +44,7 @@ production version without code changes.
 - [x] T1 — deps + settings + model loader (`model.py`), `/health`, `/model-info`,
   `POST /model/reload`; lifespan with startup load and background refresh. Tests
   with a fake registry/loader. Route: delegated (writer trigger, 2+ files).
-- [ ] T2 — `/predict`: pydantic schemas (44 fields, identifiers rejected),
+- [x] T2 — `/predict`: pydantic schemas (44 fields, identifiers rejected),
   `asyncio.to_thread` inference, `inference.logs` repository (async pool), row for
   success and failure, `request_id` echo. Tests with fake repository. Route: delegated.
 - [ ] T3 — metrics middleware + `/metrics`; counters/histogram/gauge; tests. Route: delegated.
@@ -82,5 +82,16 @@ psycopg 3.3.6, pyarrow 25.0.1).
 - `uv lock --check` → `Resolved 106 packages` (lock up to date).
 - `uv run python -c "import api_inference.main"` → import ok (DSN resolved lazily
   in `open()`, so import needs no DB env).
-- Commit: see `git log` entry `feat(api-inference): add model service, settings
-  and health/model-info/reload routes`.
+- Commit: `30b8853` `feat(api-inference): add model service, settings and
+  health/model-info/reload routes`.
+
+### T2 — /predict + inference.logs (route: delegated writer)
+- `schemas.py` builds `PredictFeatures` with `create_model` from
+  `INPUT_COLUMNS`/`NUMERIC_INPUTS` (Strict types, aliases keep
+  `glyburide-metformin` as the JSON key, `extra="forbid"`); `predict.py` holds
+  the route and the `RequestValidationError` handler that writes a `failed` row
+  (`validation_error`) with the submitted `features` object (or `{"raw": ...}`).
+- `processing_time_ms` covers normalisation + inference, not the DB write.
+- RED: `uv run pytest -q` → `18 failed, 11 passed` (all T2 tests failing).
+- GREEN: `uv run pytest -q` → `29 passed`.
+- `uv lock --check` → `Resolved 106 packages`; `import api_inference.main` → ok.
