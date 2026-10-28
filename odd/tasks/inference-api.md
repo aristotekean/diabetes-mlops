@@ -48,7 +48,7 @@ production version without code changes.
   `asyncio.to_thread` inference, `inference.logs` repository (async pool), row for
   success and failure, `request_id` echo. Tests with fake repository. Route: delegated.
 - [x] T3 — metrics middleware + `/metrics`; counters/histogram/gauge; tests. Route: delegated.
-- [ ] T4 — compose wiring for the API (train DB env, `depends_on` postgres-train /
+- [x] T4 — compose wiring for the API (train DB env, `depends_on` postgres-train /
   train-db-migrate), Dockerfile install of `ml/diabetes_model`, API README (es)
   explaining the loading strategy. Route: delegated (same writer).
 
@@ -111,3 +111,63 @@ psycopg 3.3.6, pyarrow 25.0.1).
 - RED: `uv run pytest -q` → `7 failed, 29 passed`.
 - GREEN: `uv run pytest -q` → `36 passed`.
 - `uv lock --check` → `Resolved 106 packages`; `import api_inference.main` → ok.
+- Commit: `c6a1a3f` `feat(api-inference): expose Prometheus metrics via ASGI
+  middleware`.
+
+### T4 — compose, Dockerfile, README (route: delegated writer)
+- Test-first exception: passive config/docs, no runnable RED; structural checks
+  used instead (`docker compose config -q`, image build, in-image import).
+- Compose: `MODEL_REFRESH_SECONDS=60`, `TRAIN_DB_*` for `postgres-train`,
+  `depends_on` on `postgres-train` (service_healthy) and `train-db-migrate`
+  (service_completed_successfully); header comment updated (API no longer
+  restart-loops without a model).
+- Dockerfile: first attempt copied `ml/diabetes_model` to `/ml` with the
+  project at `/app`; uv refused `/app/../../ml` ("cannot normalize a relative
+  path beyond the base directory"). Final layout mirrors the repo under `/src`
+  (`/src/ml/diabetes_model`, `WORKDIR /src/apps/api-inference`) with
+  `UV_PROJECT_ENVIRONMENT=/app/.venv`, so the runtime stage still copies
+  `/app/.venv`. `MLFLOW_DISABLE_AGENT_HINT=1` added to silence the import hint.
+- README (es) documents endpoints, loading strategy, logging decision, metrics,
+  configuration and the Python 3.14 rationale.
+- `docker compose config -q` → ok.
+- `docker compose build api-inference` → `Image aristotekean/diabetes-api-inference:0.1.0 Built`.
+- In-image smoke: `/app/.venv/bin/uvicorn` shebang `#!/app/.venv/bin/python`;
+  `import api_inference.main, diabetes_model, sklearn, skops, psycopg_pool` →
+  ok (sklearn 1.9.1, CPython 3.14.10).
+- Final local suite: `uv lock --check` ok, `uv run pytest -q` → `36 passed`,
+  `import api_inference.main` ok.
+
+### Delivery
+Authored changed lines vs `c307ea9` (excluding `uv.lock` and `odd/`): 1862.
+Above the ~400-line budget; strategy `ask-on-risk` → the parent must ask the
+user for the chain strategy (`stacked-to-main` or `feature-branch-chain`)
+before any PR. Natural slice boundaries: `30b8853` (T1), `0dd6217` (T2),
+`c6a1a3f` (T3), T4 commit.
+
+### Next step
+Human decision: push / PR strategy. Not covered by tests: a live run against
+MLflow + postgres-train (`docker compose up -d api-inference` then
+`POST /predict` with the contract example) — run once a training DAG has
+registered `diabetes@production`.
+
+### Parent spot check and native review (2026-10-27)
+- Parent re-ran `uv run pytest -q` → `36 passed`; working tree clean; 5 commits on
+  the branch (`9789da9` doc, `30b8853`, `0dd6217`, `c6a1a3f`, `cf7edb8`).
+- `gentle-ai review assess --base-ref c307ea9 --committed-only` → tier `medium`
+  (`executable_change` on `.python-version`), `review_due: false`,
+  `review_due_reason: under_budget` → slice stays pending; reviewed boundary
+  remains `c307ea9`. No review ceremony started.
+
+### Delivery: stacked PRs to main (chosen by the user, 2026-10-27)
+Chain strategy `stacked-to-main`; each slice is one task commit and was verified
+green on its own branch (`11`, `29`, `36`, `36` tests).
+
+| PR | Branch | Base | Commits | Authored lines |
+|----|--------|------|---------|----------------|
+| #5 | `feat/inference-api-01-model-service` | `main` | `9789da9`, `30b8853` | 1074 (+2280 `uv.lock`) — `size:exception` recommended |
+| #6 | `feat/inference-api-02-predict` | PR #5 branch | `0dd6217` | 443 — `size:exception` recommended |
+| #7 | `feat/inference-api-03-metrics` | PR #6 branch | `c6a1a3f` | 282 |
+| #8 | `feat/inference-api-04-compose-docs` | PR #7 branch | `cf7edb8`, `f464edf`, this commit | 248 |
+
+After each parent merges, retarget the next PR to `main` so GitHub shows only
+its slice. Merge order: #5 → #6 → #7 → #8.
