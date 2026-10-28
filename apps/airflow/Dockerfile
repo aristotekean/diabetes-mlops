@@ -23,6 +23,10 @@ RUN chown -R airflow:root /tmp/diabetes-model /tmp/requirements.txt \
 
 USER airflow
 
+# Airflow only adds dags/, config/ and plugins/ to sys.path; the repo-root
+# scripts package copied above lives in /opt/airflow, so expose it explicitly.
+ENV PYTHONPATH=/opt/airflow
+
 # Re-stating apache-airflow pins its version so pip cannot upgrade or
 # downgrade it while resolving the DAG dependencies.
 RUN pip install --no-cache-dir \
