@@ -12,7 +12,8 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from api_inference.model import ModelError, ModelNotLoadedError, ModelService
+from api_inference.metrics import INFERENCE_LOG_FAILURES, PREDICTION_DURATION, PREDICTIONS
+from api_inference.model import ModelNotLoadedError, ModelService
 from api_inference.repository import InferenceLogRecord, InferenceLogRepository
 from api_inference.schemas import ModelIdentity, PredictRequest, PredictResponse
 
@@ -41,6 +42,7 @@ async def _safe_log(repository: InferenceLogRepository, record: InferenceLogReco
         await repository.log(record)
         return True
     except Exception:
+        INFERENCE_LOG_FAILURES.inc()
         logger.exception("inference log write failed for request %s", record.request_id)
         return False
 
@@ -79,6 +81,7 @@ def build_router(service: ModelService, repository: InferenceLogRepository) -> A
         try:
             result = await service.predict(payload.feature_values())
         except ModelNotLoadedError as exc:
+            PREDICTIONS.labels(status="model_unavailable").inc()
             await _safe_log(
                 repository,
                 InferenceLogRecord(
@@ -96,6 +99,7 @@ def build_router(service: ModelService, repository: InferenceLogRepository) -> A
             )
         except Exception as exc:
             loaded = service.loaded
+            PREDICTIONS.labels(status="inference_error").inc()
             logger.exception("inference failed for request %s", request_id)
             await _safe_log(
                 repository,
@@ -117,7 +121,10 @@ def build_router(service: ModelService, repository: InferenceLogRepository) -> A
                 "the model failed to score this observation",
             )
 
-        processing_time_ms = (time.perf_counter() - started) * 1000
+        elapsed = time.perf_counter() - started
+        PREDICTIONS.labels(status="succeeded").inc()
+        PREDICTION_DURATION.observe(elapsed)
+        processing_time_ms = elapsed * 1000
         record = InferenceLogRecord(
             request_id=request_id,
             input_data=submitted,
@@ -150,6 +157,7 @@ def build_validation_handler(repository: InferenceLogRepository):
         errors = jsonable_encoder(exc.errors(), exclude={"input", "url", "ctx"})
         content: dict[str, Any] = {"detail": errors}
         if request.url.path == PREDICT_PATH:
+            PREDICTIONS.labels(status="validation_error").inc()
             request_id = request_id_from_body(exc.body)
             message = "; ".join(
                 f"{'.'.join(str(part) for part in error.get('loc', ()))}: {error.get('msg')}"
