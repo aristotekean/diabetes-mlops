@@ -56,3 +56,6 @@ webserver_config.py
 
 # Tooling
 .atl/
+
+# ODD feature documents (local working notes)
+odd/
