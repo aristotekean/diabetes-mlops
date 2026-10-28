@@ -157,3 +157,17 @@ registered `diabetes@production`.
   (`executable_change` on `.python-version`), `review_due: false`,
   `review_due_reason: under_budget` → slice stays pending; reviewed boundary
   remains `c307ea9`. No review ceremony started.
+
+### Delivery: stacked PRs to main (chosen by the user, 2026-10-27)
+Chain strategy `stacked-to-main`; each slice is one task commit and was verified
+green on its own branch (`11`, `29`, `36`, `36` tests).
+
+| PR | Branch | Base | Commits | Authored lines |
+|----|--------|------|---------|----------------|
+| #5 | `feat/inference-api-01-model-service` | `main` | `9789da9`, `30b8853` | 1074 (+2280 `uv.lock`) — `size:exception` recommended |
+| #6 | `feat/inference-api-02-predict` | PR #5 branch | `0dd6217` | 443 — `size:exception` recommended |
+| #7 | `feat/inference-api-03-metrics` | PR #6 branch | `c6a1a3f` | 282 |
+| #8 | `feat/inference-api-04-compose-docs` | PR #7 branch | `cf7edb8`, `f464edf`, this commit | 248 |
+
+After each parent merges, retarget the next PR to `main` so GitHub shows only
+its slice. Merge order: #5 → #6 → #7 → #8.
