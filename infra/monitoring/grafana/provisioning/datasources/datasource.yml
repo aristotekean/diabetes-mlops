@@ -9,11 +9,9 @@ datasources:
     uid: prometheus
     type: prometheus
     access: proxy
-    # Env-driven so the same provisioning works in both modes (Grafana expands
-    # environment variables in provisioning files):
-    #   base compose          -> http://prometheus:9090   (separate containers)
-    #   tailscale sidecar mode -> http://localhost:9090    (shared net namespace)
-    url: $PROMETHEUS_URL
+    # Grafana y Prometheus son contenedores separados en la misma red del stack,
+    # así que Grafana alcanza Prometheus por su nombre de servicio.
+    url: http://prometheus:9090
     isDefault: true
     editable: false
     jsonData:

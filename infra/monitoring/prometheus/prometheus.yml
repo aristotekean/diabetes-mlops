@@ -15,16 +15,14 @@ scrape_configs:
   # The service under observation. The target lives in a separate file
   # (prometheus/targets/api-targets.yml) so it can be changed per deployment
   # without editing this config: `api-inference:8000` on the local compose
-  # network, or Server A's tailnet name (e.g. server-a:8000) from a dedicated
-  # Server C joined to Tailscale. file_sd reloads the target automatically.
+  # network, or Server A's address (host:port) from a dedicated Server C.
+  # file_sd reloads the target automatically.
   - job_name: diabetes-api
     metrics_path: /metrics
     file_sd_configs:
       - files: ["/etc/prometheus/targets/*.yml"]
 
   # Prometheus scraping itself (useful to confirm the stack is alive).
-  # localhost works in both modes: on its own network, and when it shares the
-  # Tailscale sidecar's network namespace.
   - job_name: prometheus
     static_configs:
       - targets: ["localhost:9090"]

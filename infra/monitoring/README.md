@@ -97,48 +97,44 @@ Ahora el target `diabetes-api` pasa a **UP** y los paneles se llenan. `file_sd`
 recarga el target sin reiniciar, así que para apuntar a otra dirección basta
 editar `prometheus/targets/api-targets.yml`.
 
-## Despliegue en un Server C dedicado (Tailscale)
+## Despliegue en un Server C dedicado
 
-En la arquitectura de la plataforma los tres servidores se conectan por una red
-**Tailscale** (tailnet `aristotekean.github`). El monitoreo vive en **Server C**
-y alcanza la API de Server A **a través de la tailnet**, no por la red local de
-Docker.
+Cuando el monitoreo corre en una máquina aparte del clúster, apunta el scrape a
+la dirección de la API en `prometheus/targets/api-targets.yml` (host:puerto
+alcanzable desde Server C) y levanta el stack con `docker-compose.yml`. Prometheus
+recarga el target sin reiniciar (`file_sd`).
 
-El archivo [`docker-compose.tailscale.yml`](docker-compose.tailscale.yml) añade
-un *sidecar* de Tailscale. Prometheus y Grafana comparten su namespace de red
-(`network_mode: service:tailscale`), así que Server C aparece en la tailnet como
-un único nodo (`monitoring`):
+### Conectar Server C a la red Tailscale (opcional, instalado en el host)
 
-```
-Server A (API) ─┐
-                ├─ Tailscale ─► [ Server C: ts sidecar ⇄ Prometheus + Grafana ]
-Server B ───────┘
-```
+En la arquitectura del equipo los tres servidores se conectan por una **tailnet**
+de Tailscale. Esta es la forma **instalando Tailscale en el host** de Server C
+(no requiere contenedor ni auth key; es un extra del equipo, no del taller):
 
-Pasos en Server C:
+1. **Instalar Tailscale** en Server C: <https://tailscale.com/download>.
+2. **Iniciar sesión** (login en el navegador):
+   ```bash
+   sudo tailscale up
+   ```
+   Al autenticarte, Server C queda como un nodo de la tailnet.
+3. **Verificar** que está conectado y ver las IPs/nombres de los nodos:
+   ```bash
+   tailscale status
+   ```
+4. **Apuntar Prometheus a la API por la tailnet** en
+   `prometheus/targets/api-targets.yml`, usando la **IP de tailnet** de Server A
+   (las IPs `100.x.y.z` se enrutan desde los contenedores a través del host):
+   ```yaml
+   - targets: ["100.x.y.z:8000"]   # IP de Server A en la tailnet
+   ```
+   > Si prefieres el **nombre** (`server-a:8000`) en vez de la IP, corre Prometheus
+   > con `network_mode: host` para que use el MagicDNS del host.
+5. **Levantar el monitoreo** normal:
+   ```bash
+   docker compose -f docker-compose.yml up -d
+   ```
 
-```bash
-cd infra/monitoring
-cp .env.example .env            # y poner TS_AUTHKEY (admin de Tailscale → Keys)
-# apuntar el scrape a Server A en la tailnet:
-#   prometheus/targets/api-targets.yml  ->  - targets: ["server-a:8000"]
-docker compose -f docker-compose.tailscale.yml up -d
-```
-
-Acceso desde cualquier equipo de la tailnet:
-
-| Servicio | URL en la tailnet |
-|----------|-------------------|
-| Grafana | <http://monitoring:3000> (`admin` / `admin`) |
-| Prometheus | <http://monitoring:9090> |
-
-Los puertos también se publican en el host (en el sidecar) para depuración
-local. El scrape target se cambia sin reiniciar: Prometheus recarga
-`prometheus/targets/api-targets.yml` automáticamente (`file_sd`).
-
-> Variables de Tailscale (en `infra/monitoring/.env`): `TS_AUTHKEY` (requerida),
-> `TS_HOSTNAME` (nombre del nodo, default `monitoring`), `TS_EXTRA_ARGS`
-> (p. ej. `--advertise-tags=tag:monitoring`).
+Así Server C alcanza la API de Server A **de forma privada por la tailnet**, sin
+abrir puertos públicos y sin cambiar el stack de monitoreo.
 
 ## Variables de entorno (opcionales)
 
@@ -156,8 +152,7 @@ local. El scrape target se cambia sin reiniciar: Prometheus recarga
 infra/monitoring/
 ├── docker-compose.yml                    S8 Prometheus + S9 Grafana (independiente)
 ├── docker-compose.integration.yml        overlay: conecta Prometheus a la red de la API
-├── docker-compose.tailscale.yml          Server C: sidecar Tailscale + S8 + S9
-├── .env.example                          variables (TS_AUTHKEY, puertos, admin)
+├── .env.example                          variables (puertos, admin de Grafana)
 ├── prometheus/
 │   ├── prometheus.yml                    configuración de scrape (file_sd)
 │   └── targets/

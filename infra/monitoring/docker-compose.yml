@@ -60,9 +60,6 @@ services:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
       GF_USERS_ALLOW_SIGN_UP: "false"
-      # Datasource URL used by the provisioned datasource. Separate containers
-      # on the compose network reach Prometheus by its service name.
-      PROMETHEUS_URL: http://prometheus:9090
       # Land on the provisioned dashboard straight away.
       GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/diabetes-api.json
     ports:
