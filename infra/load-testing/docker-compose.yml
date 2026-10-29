@@ -17,15 +17,28 @@
 #   mkdir -p results     # create it first: Docker would create it as root
 #   LOCUST_HOST=http://<SERVER_A>:<PORT> \
 #   LOCUST_ARGS="--headless -u 50 -r 5 -t 3m --csv /mnt/results/u50" \
-#   docker compose --profile loadtest up --abort-on-container-exit
+#   docker compose --profile loadtest up --abort-on-container-exit locust-master locust-worker
 #
 # Watch the generator too (`docker stats`): if it saturates before the API,
 # the numbers describe the generator, not the service.
-# Tunables (env or .env): LOCUST_HOST, LOCUST_WORKERS, LOCUST_PORT, LOCUST_ARGS.
+# Degradation search: LOCUST_STEP_LOAD=1 replaces users/spawn rate with a
+# staircase (see locustfile.py): +LOCUST_STEP_USERS every LOCUST_STEP_SECONDS up
+# to LOCUST_STEP_MAX_USERS.
+#   mkdir -p results
+#   LOCUST_STEP_LOAD=1 LOCUST_ARGS="--headless --csv /mnt/results/steps" \
+#   docker compose --profile loadtest up --abort-on-container-exit locust-master locust-worker
+#
+# Tunables (env or .env): LOCUST_HOST, LOCUST_WORKERS, LOCUST_PORT, LOCUST_ARGS,
+# LOCUST_STEP_LOAD, LOCUST_STEP_USERS, LOCUST_STEP_SECONDS, LOCUST_STEP_MAX_USERS.
 
 x-locust: &locust
   image: locustio/locust:2.46.7
   profiles: [ "loadtest" ]
+  environment:
+    LOCUST_STEP_LOAD: ${LOCUST_STEP_LOAD:-0}
+    LOCUST_STEP_USERS: ${LOCUST_STEP_USERS:-10}
+    LOCUST_STEP_SECONDS: ${LOCUST_STEP_SECONDS:-60}
+    LOCUST_STEP_MAX_USERS: ${LOCUST_STEP_MAX_USERS:-100}
   volumes:
     - .:/mnt/locust:ro
 
