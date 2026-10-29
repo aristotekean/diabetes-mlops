@@ -1,0 +1,29 @@
+# Diabetes MLOps · overlay de integración (monitoreo ⇄ API en la misma máquina)
+#
+# Conecta Prometheus a la red del stack de la API (el compose raíz usa
+# `name: diabetes`, así que su red por defecto es `diabetes_default`). Con esto
+# Prometheus resuelve y scrapea `api-inference:8000/metrics` sin tocar el compose
+# raíz (que es de otro componente).
+#
+# Requisito: el stack de la API debe estar arriba primero (crea la red):
+#   docker compose up -d                     # desde la raíz del repo (API, MLflow, ...)
+#
+# Luego el monitoreo conectado a esa red:
+#   cd infra/monitoring
+#   docker compose -f docker-compose.yml -f docker-compose.integration.yml up -d
+#
+# Sin este overlay, `docker compose -f docker-compose.yml up -d` sigue funcionando
+# de forma independiente (el target de la API aparece DOWN hasta conectarlo).
+
+networks:
+  # Red del stack de la API, creada por el compose raíz. `external: true` =
+  # no la crea este compose, se une a la ya existente.
+  diabetes:
+    external: true
+    name: diabetes_default
+
+services:
+  prometheus:
+    networks:
+      - default    # su propia red (Grafana ⇄ Prometheus)
+      - diabetes   # red de la API (alcanza api-inference:8000)

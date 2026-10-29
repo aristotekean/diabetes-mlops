@@ -1,0 +1,18 @@
+# Grafana datasource provisioning · the Prometheus of this stack.
+# The fixed uid (`prometheus`) is what the provisioned dashboard references,
+# so the dashboard binds to this datasource automatically on first start.
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    # Grafana y Prometheus son contenedores separados en la misma red del stack,
+    # así que Grafana alcanza Prometheus por su nombre de servicio.
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 15s
