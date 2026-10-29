@@ -13,7 +13,7 @@
 #   docker compose -f apps/airflow/compose.yml up -d --build
 
 x-airflow-common: &airflow-common
-  image: ${DOCKERHUB_USER:-aristotekean}/diabetes-airflow:0.1.0
+  image: ${DOCKERHUB_USER:-aristotekean}/diabetes-airflow:${IMAGE_TAG:-0.1.0}
   build:
     context: ../..
     dockerfile: apps/airflow/Dockerfile
@@ -52,7 +52,10 @@ x-airflow-common: &airflow-common
     - ./plugins:/opt/airflow/plugins
     - ./config:/opt/airflow/config
     - ../../data/Diabetes:/opt/airflow/data/Diabetes
-  user: "50000:0"
+  # On Linux bind mounts keep the host's ownership, so the Airflow user must be
+  # the host user (AIRFLOW_UID=$(id -u) in .env) to write logs and download the
+  # dataset. Docker Desktop/OrbStack on macOS map ownership, so 50000 works.
+  user: "${AIRFLOW_UID:-50000}:0"
   depends_on: &airflow-common-depends-on
     airflow-db:
       condition: service_healthy
@@ -73,7 +76,8 @@ services:
       POSTGRES_USER: app
       POSTGRES_PASSWORD: app
     ports:
-      - "5432:5432"
+      # Change POSTGRES_TRAIN_PORT if the host already runs PostgreSQL.
+      - "${POSTGRES_TRAIN_PORT:-5432}:5432"
     volumes:
       - postgres-train-data:/var/lib/postgresql/data
     healthcheck:
@@ -132,8 +136,8 @@ services:
     command:
       - -c
       - |
-        mkdir -p /opt/airflow/{logs,dags,plugins,config}
-        chown -R "50000:0" /opt/airflow/{logs,dags,plugins,config}
+        mkdir -p /opt/airflow/{logs,dags,plugins,config,data/Diabetes}
+        chown -R "${AIRFLOW_UID:-50000}:0" /opt/airflow/{logs,dags,plugins,config,data/Diabetes}
         exec /entrypoint airflow version
     environment:
       <<: *airflow-common-env

@@ -8,9 +8,18 @@ authors = [
 ]
 requires-python = ">=3.15.1"
 dependencies = [
+    "pandas>=3.1",
     "requests>=2.34.2",
     "streamlit>=1.66.1",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [build-system]
 requires = ["uv_build>=0.13.5,<0.14.0"]

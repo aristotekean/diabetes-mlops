@@ -9,9 +9,12 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 
-from fastapi import FastAPI, HTTPException, Request, status
+from fastapi import FastAPI, HTTPException, Response, status
+from fastapi.exceptions import RequestValidationError
 
+from api_inference.metrics import METRICS_PATH, MetricsMiddleware, metrics_response
 from api_inference.model import ModelLoadError, ModelService
+from api_inference.predict import build_router, build_validation_handler
 from api_inference.repository import InferenceLogRepository, PostgresInferenceLogRepository
 from api_inference.schemas import ErrorDetail, HealthResponse, ModelInfoResponse, ReloadResponse
 from api_inference.settings import Settings, get_settings
@@ -113,6 +116,9 @@ def create_app(
     app.state.settings = settings
     app.state.model_service = service
     app.state.repository = repo
+    app.include_router(build_router(service, repo))
+    app.add_exception_handler(RequestValidationError, build_validation_handler(repo))
+    app.add_middleware(MetricsMiddleware)
 
     @app.get("/health", response_model=HealthResponse, tags=["ops"])
     async def health() -> HealthResponse:
@@ -149,6 +155,10 @@ def create_app(
             current_version=loaded.version,
             changed=previous != loaded.version,
         )
+
+    @app.get(METRICS_PATH, include_in_schema=False)
+    async def metrics() -> Response:
+        return metrics_response()
 
     return app
 

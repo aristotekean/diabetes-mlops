@@ -28,6 +28,41 @@ infra/monitoring observabilidad con Prometheus y Grafana (Server C)
 infra/load-testing  pruebas de carga con Locust (Server B)
 ```
 
+## Imágenes y ejecución en Mac o Linux
+
+Las imágenes propias (`diabetes-api-inference`, `diabetes-frontend` y
+`diabetes-airflow`) se publican en DockerHub para `linux/amd64` y `linux/arm64`
+bajo un mismo tag. Cada máquina descarga la variante de su procesador, así que
+las mismas imágenes corren nativas en un Mac con Apple Silicon y en un servidor,
+VM o nodo de Kubernetes Linux, sin emulación.
+
+Para construirlas y publicarlas (desde la raíz, con el árbol de Git limpio):
+
+```bash
+docker login                                   # con la cuenta de DOCKERHUB_USER
+scripts/publish_images.sh                      # construye ambas arquitecturas y publica
+scripts/publish_images.sh --check              # solo construye, sin publicar
+IMAGE_TAG=0.1.1 scripts/publish_images.sh api-inference   # un componente, otro tag
+```
+
+El script usa un builder `docker-container` de buildx (lo crea si falta); la
+arquitectura ajena se compila emulada, por lo que esa parte tarda más. Publica un
+tag nuevo en cada cambio: los nodos guardan en caché la imagen de un tag ya
+descargado.
+
+Para levantar el stack en un **servidor o VM Linux**, copia `.env.example` a
+`.env` y ajusta:
+
+- `AIRFLOW_UID` con el resultado de `id -u`, para que Airflow pueda escribir
+  `apps/airflow/logs` y descargar el dataset en `data/Diabetes`.
+- `MLFLOW_ALLOWED_HOSTS` con la IP o el nombre del servidor (p. ej.
+  `192.168.1.50:*`) para abrir la UI de MLflow desde otra máquina; sin eso
+  responde 403.
+- `POSTGRES_TRAIN_PORT` u otros puertos si el host ya los usa.
+
+Luego `docker compose up -d` descarga las imágenes publicadas
+(`docker compose up -d --build` las construye en el propio servidor).
+
 ## Dataset
 
 Descarga el dataset Diabetes 130-US hospitals indicado en el taller desde la raíz
