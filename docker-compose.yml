@@ -7,9 +7,17 @@
 #   S7 Frontend                ---->  S4 Inference API (Streamlit UI)
 #
 # From the repository root:
-#   docker compose up -d --build
-# Tunables (env or .env): API_PORT, API_CPUS, API_MEMORY, FRONTEND_PORT,
-# MLFLOW_ALLOWED_HOSTS, AIRFLOW_PORT, AIRFLOW_ADMIN_USER, AIRFLOW_ADMIN_PASSWORD,
+#   docker compose up -d --build     # build the project images on this host
+#   docker compose up -d             # or pull them from DockerHub (multi-arch)
+# The project images are published for linux/amd64 and linux/arm64 by
+# scripts/publish_images.sh, so the same tags run on an Apple Silicon Mac and
+# on a Linux server or VM. On Linux set AIRFLOW_UID to your user id first (see
+# .env.example) so Airflow can write the bind-mounted folders.
+#
+# Tunables (env or .env): DOCKERHUB_USER, IMAGE_TAG, API_PORT, API_CPUS,
+# API_MEMORY, FRONTEND_PORT, MLFLOW_PORT, MLFLOW_DB_PORT, MINIO_PORT,
+# MINIO_CONSOLE_PORT, MLFLOW_ALLOWED_HOSTS, AIRFLOW_UID, AIRFLOW_PORT,
+# POSTGRES_TRAIN_PORT, AIRFLOW_ADMIN_USER, AIRFLOW_ADMIN_PASSWORD,
 # AIRFLOW_JWT_SECRET.
 #
 # Locust (Server B) is behind the `loadtest` profile, so it never starts by
@@ -49,7 +57,7 @@ services:
       POSTGRES_USER: mlflow
       POSTGRES_PASSWORD: mlflow
     ports:
-      - "5431:5432"
+      - "${MLFLOW_DB_PORT:-5431}:5432"
     volumes:
       - mlflow-db-data:/var/lib/postgresql/data
     healthcheck:
@@ -74,8 +82,8 @@ services:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "${MINIO_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
     volumes:
       - minio-data:/data
     healthcheck:
@@ -123,10 +131,11 @@ services:
         pip install --no-cache-dir --quiet \
           psycopg2-binary==2.9.10 \
           boto3==1.40.49
-        # DNS-rebinding guard (--allowed-hosts): by default only localhost /
-        # private IPs pass. The in-network service name (clients) and the
-        # OrbStack domain are allowed; on a VM add its IP/hostname via
-        # MLFLOW_ALLOWED_HOSTS to open the UI.
+        # DNS-rebinding guard (--allowed-hosts): requests whose Host header is
+        # not listed get 403 (only /health is exempt). The in-network service
+        # name (clients) and the OrbStack domain are allowed; on a Linux
+        # server or VM add the IP/hostname used to open the UI through
+        # MLFLOW_ALLOWED_HOSTS, e.g. 192.168.1.50:*.
         exec mlflow server \
           --host 0.0.0.0 \
           --port 5000 \
@@ -140,7 +149,7 @@ services:
       AWS_SECRET_ACCESS_KEY: minioadmin
     ports:
       # Host port 5001: macOS AirPlay Receiver squats 5000 on the host.
-      - "5001:5000"
+      - "${MLFLOW_PORT:-5001}:5000"
     healthcheck:
       test: [ "CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:5000/health', timeout=4)" ]
       interval: 15s
@@ -163,7 +172,7 @@ services:
   # in the cluster the Ingress controller fronts it instead.
   # ------------------------------------------------------------------------- #
   api-inference:
-    image: ${DOCKERHUB_USER:-aristotekean}/diabetes-api-inference:0.1.0
+    image: ${DOCKERHUB_USER:-aristotekean}/diabetes-api-inference:${IMAGE_TAG:-0.1.0}
     build:
       context: .
       dockerfile: apps/api-inference/Dockerfile
@@ -202,7 +211,7 @@ services:
   # S7 · Frontend (Streamlit UI; talks to the Inference API only)
   # ------------------------------------------------------------------------- #
   frontend:
-    image: ${DOCKERHUB_USER:-aristotekean}/diabetes-frontend:0.1.0
+    image: ${DOCKERHUB_USER:-aristotekean}/diabetes-frontend:${IMAGE_TAG:-0.1.0}
     build:
       context: .
       dockerfile: apps/frontend/Dockerfile
