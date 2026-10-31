@@ -60,24 +60,37 @@ render() {
 # side under the mount point. The train-db-migrate Job mounts this ConfigMap at
 # /database and sets MIGRATIONS_DIR=/database to match that flat layout.
 HEADER
+  # POSIX sh has no pipefail, so kubectl is NOT piped into awk: its output is
+  # captured first and any failure (kubectl missing, unreadable source file,
+  # bad flag) aborts the render. Otherwise a failed kubectl would leave a
+  # header-only manifest that write mode copies over the committed ConfigMap
+  # while reporting success.
+  if ! kubectl create configmap train-db-migrations \
+      --from-file="$SOURCE_DIR/migrate.sh" \
+      --from-file="$SOURCE_DIR/migrations" \
+      --dry-run=client -o yaml > "$RAW"; then
+    echo "error: kubectl create configmap failed; nothing was rendered" >&2
+    exit 1
+  fi
+  if ! grep -q '^kind: ConfigMap$' "$RAW"; then
+    echo "error: kubectl output is not a ConfigMap manifest; nothing was rendered" >&2
+    exit 1
+  fi
   # kubectl emits deterministic YAML (sorted keys); only the empty
   # creationTimestamp is dropped and the per-resource name label added.
-  kubectl create configmap train-db-migrations \
-    --from-file="$SOURCE_DIR/migrate.sh" \
-    --from-file="$SOURCE_DIR/migrations" \
-    --dry-run=client -o yaml \
-  | awk '
+  awk '
       /^  creationTimestamp: null$/ { next }
       { print }
       /^  name: train-db-migrations$/ {
         print "  labels:"
         print "    app.kubernetes.io/name: train-db-migrate"
       }
-    '
+    ' "$RAW"
 }
 
 TMP="$(mktemp "${TMPDIR:-/tmp}/render-migrations.XXXXXX")"
-trap 'rm -f "$TMP"' EXIT
+RAW="$(mktemp "${TMPDIR:-/tmp}/render-migrations-raw.XXXXXX")"
+trap 'rm -f "$TMP" "$RAW"' EXIT
 
 render > "$TMP"
 
