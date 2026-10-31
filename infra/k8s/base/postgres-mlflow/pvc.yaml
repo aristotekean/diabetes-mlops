@@ -1,0 +1,12 @@
+# No storageClassName: the cluster default is used (OrbStack: `local-path`,
+# bound when the first pod is scheduled).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mlflow-db-data
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi

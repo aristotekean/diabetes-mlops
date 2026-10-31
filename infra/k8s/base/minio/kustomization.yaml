@@ -1,0 +1,14 @@
+# S3 · MinIO, the artifact store behind the MLflow server, plus the one-shot
+# Job that creates the `mlflow` bucket (MinIO does not create buckets on start).
+#
+# Chainguard build of MinIO (MinIO removed its own public images in 2026-09).
+# Distroless-style image: runs as uid 65532 and ships `minio`, `mc` and a
+# minimal `/bin/sh` only (no curl/wget), hence the HTTP probes below.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - pvc.yaml
+  - deployment.yaml
+  - service.yaml
+  - job-init.yaml

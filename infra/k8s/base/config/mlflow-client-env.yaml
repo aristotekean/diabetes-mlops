@@ -1,0 +1,11 @@
+# Mirror of the `x-mlflow-client-env` anchor in docker-compose.yml.
+# Artifacts are proxied by the MLflow server (--serve-artifacts), so clients
+# only need the tracking URI. The S3 endpoint is kept so direct access to the
+# bucket also works when needed (credentials live in `minio-credentials`).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mlflow-client-env
+data:
+  MLFLOW_TRACKING_URI: http://mlflow:5000
+  MLFLOW_S3_ENDPOINT_URL: http://minio:9000

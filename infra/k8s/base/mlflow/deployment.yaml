@@ -1,0 +1,132 @@
+# Official MLflow image. It ships MLflow only, so the two client libraries the
+# server needs (psycopg2 for Postgres, boto3 for S3/MinIO) are installed at
+# container start instead of baking a custom image. This needs network access
+# on every start and adds ~30-90 s before the server is up (covered by the
+# startupProbe). Both versions are pinned to keep starts reproducible.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mlflow
+  labels:
+    app.kubernetes.io/name: mlflow
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mlflow
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mlflow
+    spec:
+      # Replacement for compose `depends_on` conditions: block until the
+      # backend store accepts connections and the artifact bucket exists.
+      initContainers:
+        - name: wait-for-mlflow-db
+          image: postgres:16
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              until pg_isready -h mlflow-db -p 5432 -U "$MLFLOW_DB_USER" -d "$MLFLOW_DB_NAME"; do
+                echo "waiting for mlflow-db..."
+                sleep 2
+              done
+          env:
+            - name: MLFLOW_DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: mlflow-db-credentials
+                  key: POSTGRES_USER
+            - name: MLFLOW_DB_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: mlflow-db-credentials
+                  key: POSTGRES_DB
+        - name: wait-for-minio-bucket
+          image: cgr.dev/chainguard/minio:latest
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              until mc alias set local http://minio:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null 2>&1 \
+                && mc ls local/mlflow >/dev/null 2>&1; do
+                echo "waiting for minio bucket mlflow (created by job/minio-init)..."
+                sleep 3
+              done
+          envFrom:
+            - secretRef:
+                name: minio-credentials
+          securityContext:
+            runAsUser: 65532
+            runAsGroup: 65532
+      containers:
+        - name: mlflow
+          image: ghcr.io/mlflow/mlflow:v3.16.1
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              pip install --no-cache-dir --quiet \
+                psycopg2-binary==2.9.10 \
+                boto3==1.40.49
+              # DNS-rebinding guard (--allowed-hosts): requests whose Host
+              # header is not listed get 403 (only /health is exempt). Allowed:
+              # the in-cluster Service names (clients, probes), the OrbStack
+              # domain and anything appended through MLFLOW_ALLOWED_HOSTS
+              # (comma-separated, e.g. 192.168.1.50:* on a Linux server or VM).
+              exec mlflow server \
+                --host 0.0.0.0 \
+                --port 5000 \
+                --backend-store-uri "postgresql+psycopg2://${MLFLOW_DB_USER}:${MLFLOW_DB_PASSWORD}@mlflow-db:5432/${MLFLOW_DB_NAME}" \
+                --artifacts-destination s3://mlflow \
+                --serve-artifacts \
+                --allowed-hosts "localhost:*,127.0.0.1:*,mlflow:*,mlflow.diabetes:*,mlflow.diabetes.svc:*,mlflow.diabetes.svc.cluster.local:*,*.orb.local${MLFLOW_ALLOWED_HOSTS:+,${MLFLOW_ALLOWED_HOSTS}}"
+          env:
+            # Optional extra allowed hosts; empty by default. The shell adds the
+            # leading comma only when the value is non-empty.
+            - name: MLFLOW_ALLOWED_HOSTS
+              value: ""
+            - name: MLFLOW_DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: mlflow-db-credentials
+                  key: POSTGRES_USER
+            - name: MLFLOW_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mlflow-db-credentials
+                  key: POSTGRES_PASSWORD
+            - name: MLFLOW_DB_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: mlflow-db-credentials
+                  key: POSTGRES_DB
+          envFrom:
+            # MLFLOW_S3_ENDPOINT_URL (the tracking URI is harmless here).
+            - configMapRef:
+                name: mlflow-client-env
+            # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY for boto3.
+            - secretRef:
+                name: minio-credentials
+          ports:
+            - name: http
+              containerPort: 5000
+          # Up to 150 s for the pip install plus MLflow's own boot; liveness
+          # and readiness only start once this has passed.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 15
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 10

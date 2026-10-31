@@ -1,0 +1,37 @@
+# One-shot: create the MLflow artifact bucket. Reuses the MinIO image because
+# it ships `mc`. There is no `depends_on` in Kubernetes, so the script retries
+# `mc alias set` (which probes the server) until MinIO answers, then creates
+# the bucket idempotently. Re-running the Job on an existing bucket is a no-op.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minio-init
+  labels:
+    app.kubernetes.io/name: minio-init
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: minio-init
+    spec:
+      restartPolicy: OnFailure
+      securityContext:
+        runAsUser: 65532
+        runAsGroup: 65532
+      containers:
+        - name: mc
+          image: cgr.dev/chainguard/minio:latest
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              until mc alias set local http://minio:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD"; do
+                echo "waiting for minio..."
+                sleep 3
+              done
+              mc mb --ignore-existing local/mlflow
+              echo "bucket ready: mlflow"
+          envFrom:
+            - secretRef:
+                name: minio-credentials

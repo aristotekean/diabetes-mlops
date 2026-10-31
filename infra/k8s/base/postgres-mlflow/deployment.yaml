@@ -1,0 +1,54 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mlflow-db
+  labels:
+    app.kubernetes.io/name: mlflow-db
+spec:
+  replicas: 1
+  # A single Postgres instance owns the volume: never run two pods at once.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mlflow-db
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mlflow-db
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16
+          envFrom:
+            - secretRef:
+                name: mlflow-db-credentials
+          env:
+            # initdb refuses a non-empty directory; some provisioners drop a
+            # `lost+found` at the mount root, so the cluster lives one level
+            # below the mount point.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - name: postgres
+              containerPort: 5432
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "mlflow", "-d", "mlflow"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "mlflow", "-d", "mlflow"]
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 5
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: mlflow-db-data
