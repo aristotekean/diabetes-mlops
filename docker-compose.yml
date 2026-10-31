@@ -172,7 +172,7 @@ services:
   # in the cluster the Ingress controller fronts it instead.
   # ------------------------------------------------------------------------- #
   api-inference:
-    image: ${DOCKERHUB_USER:-aristotekean}/diabetes-api-inference:${IMAGE_TAG:-0.1.0}
+    image: ${DOCKERHUB_USER:-aristotekean}/diabetes-api-inference:${IMAGE_TAG:-0.1.1}
     build:
       context: .
       dockerfile: apps/api-inference/Dockerfile
@@ -211,7 +211,7 @@ services:
   # S7 · Frontend (Streamlit UI; talks to the Inference API only)
   # ------------------------------------------------------------------------- #
   frontend:
-    image: ${DOCKERHUB_USER:-aristotekean}/diabetes-frontend:${IMAGE_TAG:-0.1.0}
+    image: ${DOCKERHUB_USER:-aristotekean}/diabetes-frontend:${IMAGE_TAG:-0.1.1}
     build:
       context: .
       dockerfile: apps/frontend/Dockerfile
