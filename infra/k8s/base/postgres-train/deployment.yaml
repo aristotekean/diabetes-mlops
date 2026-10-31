@@ -21,8 +21,8 @@ spec:
         - name: postgres
           image: postgres:16
           env:
-            # Declared one by one (not envFrom) so the probes below can expand
-            # $(POSTGRES_USER) / $(POSTGRES_DB) instead of repeating literals.
+            # Declared one by one (not envFrom) so the variables the probes
+            # below read are visible here instead of hidden in the Secret.
             - name: POSTGRES_DB
               valueFrom:
                 secretKeyRef:
@@ -49,15 +49,24 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/postgresql/data
+          # The kubelet expands $(VAR) in exec probes only from env entries
+          # with a literal `value`, never from secretKeyRef, so the probes go
+          # through `sh -c` and let the shell read the Secret-backed variables.
           readinessProbe:
             exec:
-              command: ["pg_isready", "-U", "$(POSTGRES_USER)", "-d", "$(POSTGRES_DB)"]
+              command:
+                - /bin/sh
+                - -c
+                - pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
             initialDelaySeconds: 5
             periodSeconds: 10
             timeoutSeconds: 5
           livenessProbe:
             exec:
-              command: ["pg_isready", "-U", "$(POSTGRES_USER)", "-d", "$(POSTGRES_DB)"]
+              command:
+                - /bin/sh
+                - -c
+                - pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
             initialDelaySeconds: 30
             periodSeconds: 10
             timeoutSeconds: 5

@@ -29,7 +29,7 @@ env_default() {
 DOCKERHUB_USER="${DOCKERHUB_USER:-$(env_default DOCKERHUB_USER)}"
 DOCKERHUB_USER="${DOCKERHUB_USER:-aristotekean}"
 IMAGE_TAG="${IMAGE_TAG:-$(env_default IMAGE_TAG)}"
-IMAGE_TAG="${IMAGE_TAG:-0.1.0}"
+IMAGE_TAG="${IMAGE_TAG:-0.1.1}"
 PLATFORMS="${PLATFORMS:-linux/amd64,linux/arm64}"
 BUILDER="${BUILDER:-diabetes-multiarch}"
 ALL_COMPONENTS="api-inference frontend airflow"

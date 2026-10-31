@@ -1,6 +1,8 @@
 # S2 · MLflow tracking server + model registry.
-# Backend store: mlflow-db. Artifacts: MinIO bucket `mlflow`, proxied through
-# the server so clients never need bucket credentials.
+# Backend store: mlflow-db. Artifacts: MinIO bucket `mlflow`. The server proxies
+# artifacts (--serve-artifacts), so the tracking URI alone is enough to log and
+# download them; api-inference and airflow still receive `minio-credentials`
+# (as in compose) so direct S3 access to the bucket also works when needed.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 

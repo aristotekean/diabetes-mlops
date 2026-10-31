@@ -34,6 +34,7 @@ resources:
   - base/frontend
   - base/postgres-airflow
   - base/airflow
+  - base/ingress
 
 # Published multi-arch (amd64 + arm64) images built from this repository.
 # The service manifests (base/api-inference, base/frontend, base/airflow)
@@ -41,8 +42,8 @@ resources:
 # to name:newTag here, so this block is the single place to bump a release.
 images:
   - name: aristotekean/diabetes-api-inference
-    newTag: "0.1.0"
+    newTag: "0.1.1"
   - name: aristotekean/diabetes-frontend
-    newTag: "0.1.0"
+    newTag: "0.1.1"
   - name: aristotekean/diabetes-airflow
-    newTag: "0.1.0"
+    newTag: "0.1.1"

@@ -1,0 +1,8 @@
+# Ingress: the only entry point into the `diabetes` namespace from outside the
+# cluster. It needs an ingress controller with class `nginx`; on OrbStack
+# install ingress-nginx from the upstream manifest first (see README).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ingress.yaml
