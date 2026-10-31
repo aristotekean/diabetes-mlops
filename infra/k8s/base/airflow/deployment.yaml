@@ -1,0 +1,303 @@
+# The four Airflow services of apps/airflow/compose.yml (api-server, scheduler,
+# dag-processor, triggerer) as ONE pod. Decision for this stack: with the
+# LocalExecutor the tasks run inside the scheduler container and the api-server
+# serves their log files from disk, so the two must share /opt/airflow/logs;
+# one pod with an emptyDir does that without a shared-storage volume.
+#
+# Every container is started by the image ENTRYPOINT (dumb-init + /entrypoint),
+# which runs `airflow <args>`; the environment is the common compose block split
+# into the `airflow-env` ConfigMap, the `airflow-secrets` Secret, the shared
+# MLflow client settings and the training database password.
+#
+# The image is referenced by name only: its tag is set once in the root
+# kustomization (`images:`).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: airflow
+  labels:
+    app.kubernetes.io/name: airflow
+spec:
+  replicas: 1
+  # One scheduler/triggerer at a time against the metadata database, and the
+  # dataset PVC is ReadWriteOnce: replace the pod instead of overlapping it.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: airflow
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: airflow
+    spec:
+      # Same identity as compose (`user: 50000:0`); fsGroup 0 makes the
+      # emptyDir and the dataset volume group-writable for that gid, which
+      # replaces the chown the compose init container does on bind mounts.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 50000
+        runAsGroup: 0
+        fsGroup: 0
+      # Replacement for compose `depends_on` on airflow-db (healthy) and
+      # airflow-init (completed). Both waits are bounded; on exhaustion the init
+      # container fails and Kubernetes restarts it with backoff, which keeps
+      # the pod visibly in Init:Error instead of looping silently. MLflow and
+      # postgres-train are not waited for: a DAG run fails and retries on its
+      # own if they are down, the services themselves start fine without them.
+      initContainers:
+        - name: wait-for-airflow-db
+          image: postgres:16
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              attempt=0
+              until pg_isready -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDATABASE"; do
+                attempt=$((attempt + 1))
+                if [ "$attempt" -ge 60 ]; then
+                  echo "airflow-db not ready after $attempt attempts, giving up" >&2
+                  exit 1
+                fi
+                echo "waiting for airflow-db ($attempt/60)..."
+                sleep 2
+              done
+          env:
+            - name: PGHOST
+              value: airflow-db
+            - name: PGPORT
+              value: "5432"
+            - name: PGDATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: airflow-db-credentials
+                  key: POSTGRES_DB
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef:
+                  name: airflow-db-credentials
+                  key: POSTGRES_USER
+          # 999 is the `postgres` user of the image; pg_isready needs no root.
+          securityContext:
+            runAsUser: 999
+            runAsGroup: 999
+        # `airflow db check-migrations` polls the alembic revision until it is
+        # the latest one, i.e. until job/airflow-init has migrated the schema,
+        # and exits non-zero after 300 s. It is the only gate that matters: a
+        # Job that completed without migrating (or was deleted) is caught here.
+        - name: wait-for-migrations
+          image: aristotekean/diabetes-airflow
+          imagePullPolicy: IfNotPresent
+          args: ["db", "check-migrations", "--migration-wait-timeout", "300"]
+          envFrom:
+            - configMapRef:
+                name: airflow-env
+            - secretRef:
+                name: airflow-secrets
+      containers:
+        # Web UI, REST API and the execution API the task runners call back.
+        # /api/v2/monitor/health answers 200 as soon as the server is up and
+        # reports the scheduler/triggerer/dag-processor heartbeats in its body,
+        # so these probes mean "the api-server is serving", not "the whole
+        # stack is healthy" (the sibling containers have their own checks).
+        - name: api-server
+          image: aristotekean/diabetes-airflow
+          imagePullPolicy: IfNotPresent
+          args: ["api-server"]
+          envFrom:
+            - configMapRef:
+                name: airflow-env
+            - secretRef:
+                name: airflow-secrets
+            # MLFLOW_TRACKING_URI / MLFLOW_S3_ENDPOINT_URL.
+            - configMapRef:
+                name: mlflow-client-env
+            # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY for the artifact store.
+            - secretRef:
+                name: minio-credentials
+          env:
+            - name: TRAIN_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-train-credentials
+                  key: POSTGRES_PASSWORD
+          ports:
+            - name: http
+              containerPort: 8080
+          volumeMounts:
+            - name: airflow-logs
+              mountPath: /opt/airflow/logs
+            - name: airflow-dataset
+              mountPath: /opt/airflow/data/Diabetes
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: 500m
+              memory: 1Gi
+          # Up to 3 minutes for the first boot (Python imports, FAB auth
+          # manager initialisation); afterwards the readiness probe gates the
+          # Service and the liveness probe restarts a hung server.
+          startupProbe:
+            httpGet:
+              path: /api/v2/monitor/health
+              port: http
+            periodSeconds: 5
+            failureThreshold: 36
+          readinessProbe:
+            httpGet:
+              path: /api/v2/monitor/health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /api/v2/monitor/health
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 5
+        # Schedules DAG runs and, with the LocalExecutor, runs the tasks in
+        # subprocesses: training happens here, hence the larger limits.
+        - name: scheduler
+          image: aristotekean/diabetes-airflow
+          imagePullPolicy: IfNotPresent
+          args: ["scheduler"]
+          envFrom:
+            - configMapRef:
+                name: airflow-env
+            - secretRef:
+                name: airflow-secrets
+            - configMapRef:
+                name: mlflow-client-env
+            - secretRef:
+                name: minio-credentials
+          env:
+            - name: TRAIN_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-train-credentials
+                  key: POSTGRES_PASSWORD
+          volumeMounts:
+            - name: airflow-logs
+              mountPath: /opt/airflow/logs
+            - name: airflow-dataset
+              mountPath: /opt/airflow/data/Diabetes
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+          # Same check as the compose healthcheck. `--local` matches the job
+          # row by the hostname Airflow itself recorded (hostname_callable), so
+          # it does not depend on how $HOSTNAME is spelled; all four containers
+          # share the pod hostname, so each one still finds only its own job.
+          # The CLI needs several seconds to import Airflow: long timeout,
+          # sparse period, and a delay for the first heartbeat.
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - airflow jobs check --job-type SchedulerJob --local
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 20
+            failureThreshold: 5
+        # Parses the DAG files baked into the image and serialises them to the
+        # metadata database (mandatory standalone component in Airflow 3).
+        - name: dag-processor
+          image: aristotekean/diabetes-airflow
+          imagePullPolicy: IfNotPresent
+          args: ["dag-processor"]
+          envFrom:
+            - configMapRef:
+                name: airflow-env
+            - secretRef:
+                name: airflow-secrets
+            - configMapRef:
+                name: mlflow-client-env
+            - secretRef:
+                name: minio-credentials
+          env:
+            - name: TRAIN_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-train-credentials
+                  key: POSTGRES_PASSWORD
+          volumeMounts:
+            - name: airflow-logs
+              mountPath: /opt/airflow/logs
+            - name: airflow-dataset
+              mountPath: /opt/airflow/data/Diabetes
+          resources:
+            requests:
+              cpu: 150m
+              memory: 256Mi
+            limits:
+              cpu: 250m
+              memory: 512Mi
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - airflow jobs check --job-type DagProcessorJob --local
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 20
+            failureThreshold: 5
+        # Runs deferred operators; the training DAG does not use any yet, but
+        # /api/v2/monitor/health reports it and compose runs it, so keep parity.
+        - name: triggerer
+          image: aristotekean/diabetes-airflow
+          imagePullPolicy: IfNotPresent
+          args: ["triggerer"]
+          envFrom:
+            - configMapRef:
+                name: airflow-env
+            - secretRef:
+                name: airflow-secrets
+            - configMapRef:
+                name: mlflow-client-env
+            - secretRef:
+                name: minio-credentials
+          env:
+            - name: TRAIN_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-train-credentials
+                  key: POSTGRES_PASSWORD
+          volumeMounts:
+            - name: airflow-logs
+              mountPath: /opt/airflow/logs
+            - name: airflow-dataset
+              mountPath: /opt/airflow/data/Diabetes
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 250m
+              memory: 512Mi
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - airflow jobs check --job-type TriggererJob --local
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 20
+            failureThreshold: 5
+      volumes:
+        # Task logs written by the scheduler's task subprocesses and read by
+        # the api-server; lost with the pod, as the compose ./logs dir is not.
+        - name: airflow-logs
+          emptyDir: {}
+        - name: airflow-dataset
+          persistentVolumeClaim:
+            claimName: airflow-dataset

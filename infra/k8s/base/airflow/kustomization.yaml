@@ -1,0 +1,20 @@
+# S6 · Airflow 3 (LocalExecutor) running the diabetes training DAG: the
+# `airflow-init` Job migrates the metadata database and creates the admin user,
+# then ONE pod runs api-server + scheduler + dag-processor + triggerer. The web
+# UI / REST API is reached as `airflow-apiserver` on port 8080 (same hostname as
+# in apps/airflow/compose.yml).
+#
+# DAGs and the `scripts` package are baked into the image
+# (apps/airflow/Dockerfile), so there is no ConfigMap for dags/config/plugins.
+# The metadata database lives in base/postgres-airflow; the training database
+# (postgres-train), MLflow and MinIO come from the other bases.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - configmap.yaml
+  - secret.yaml
+  - pvc.yaml
+  - job-init.yaml
+  - deployment.yaml
+  - service.yaml

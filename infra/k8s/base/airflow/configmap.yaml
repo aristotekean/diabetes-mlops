@@ -1,0 +1,36 @@
+# Non-secret part of the `x-airflow-common` environment in
+# apps/airflow/compose.yml, attached with `envFrom` to the init Job and to the
+# four Airflow containers. Secrets (database URL, keys, TRAIN_DB_PASSWORD) and
+# the MLflow/MinIO client settings (`mlflow-client-env`, `minio-credentials`)
+# are attached separately so this file holds plain configuration only.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: airflow-env
+data:
+  AIRFLOW__CORE__EXECUTOR: LocalExecutor
+  AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+  AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+  AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+  # Task runners reach the api-server through the Service of the same name
+  # (service.yaml); the path must keep its trailing slash.
+  AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-apiserver:8080/execution/
+  # Lets /api/v2/monitor/health report the scheduler heartbeat.
+  AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
+  # S5 · training database the DAGs read from and write to (base/postgres-train).
+  # The password comes from the `postgres-train-credentials` Secret.
+  TRAIN_DB_HOST: postgres-train
+  TRAIN_DB_PORT: "5432"
+  TRAIN_DB_NAME: diabetes
+  TRAIN_DB_USER: app
+  # The DAG downloads the CSV here on first run (pvc.yaml); the directory needs
+  # outbound HTTPS to Google Drive.
+  DIABETES_DATASET_PATH: /opt/airflow/data/Diabetes/Diabetes.csv
+  DIABETES_SOURCE_URI: https://docs.google.com/uc?export=download&confirm=t&id=1k5-1caezQ3zWJbKaiMULTGq-3sz6uThC
+  # S2 · MLflow experiment / registry names (tracking URI in `mlflow-client-env`).
+  MLFLOW_EXPERIMENT_NAME: diabetes-readmission
+  MODEL_NAME: diabetes
+  MODEL_ALIAS: production
+  # Each run loads the next RAW batch, so a short interval replays the
+  # incremental arrival of the 7 batches in about an hour.
+  DIABETES_TRAINING_SCHEDULE: "*/10 * * * *"
