@@ -1,0 +1,57 @@
+# Mirror of the `frontend` service in docker-compose.yml. The image is
+# referenced by name only: its tag is set once in the root kustomization
+# (`images:`). No init wait: the UI shows the API as unreachable until
+# api-inference answers, which is the honest state during a rollout.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  labels:
+    app.kubernetes.io/name: frontend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: frontend
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: frontend
+    spec:
+      containers:
+        - name: streamlit
+          image: aristotekean/diabetes-frontend
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: API_URL
+              value: http://api-inference:8000
+          ports:
+            - name: http
+              containerPort: 8501
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          # Streamlit's own health endpoint (also used by the image HEALTHCHECK).
+          startupProbe:
+            httpGet:
+              path: /_stcore/health
+              port: http
+            periodSeconds: 5
+            failureThreshold: 12
+          readinessProbe:
+            httpGet:
+              path: /_stcore/health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /_stcore/health
+              port: http
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 5

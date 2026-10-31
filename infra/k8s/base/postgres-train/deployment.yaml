@@ -1,0 +1,68 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres-train
+  labels:
+    app.kubernetes.io/name: postgres-train
+spec:
+  replicas: 1
+  # A single Postgres instance owns the volume: never run two pods at once.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postgres-train
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: postgres-train
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16
+          env:
+            # Declared one by one (not envFrom) so the probes below can expand
+            # $(POSTGRES_USER) / $(POSTGRES_DB) instead of repeating literals.
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-train-credentials
+                  key: POSTGRES_DB
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-train-credentials
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-train-credentials
+                  key: POSTGRES_PASSWORD
+            # initdb refuses a non-empty directory; some provisioners drop a
+            # `lost+found` at the mount root, so the cluster lives one level
+            # below the mount point.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - name: postgres
+              containerPort: 5432
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "$(POSTGRES_USER)", "-d", "$(POSTGRES_DB)"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "$(POSTGRES_USER)", "-d", "$(POSTGRES_DB)"]
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 5
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: postgres-train-data

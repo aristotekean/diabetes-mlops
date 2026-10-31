@@ -1,0 +1,110 @@
+# One-shot: apply pending infra/database migrations to the training database
+# (RAW, CLEAN and INFERENCE schemas). Mirrors the `train-db-migrate` service in
+# apps/airflow/compose.yml: same image, same `sh /database/migrate.sh`
+# entrypoint, libpq PG* variables from the Secret.
+#
+# migrate.sh records applied files in public.schema_migrations, so re-running
+# the Job is safe. A Job spec is immutable once created and a changed ConfigMap
+# does not re-trigger it; to apply NEW migrations on a running cluster:
+#   bash infra/k8s/scripts/render-migrations.sh
+#   kubectl -n diabetes delete job train-db-migrate
+#   kubectl apply -k infra/k8s
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: train-db-migrate
+  labels:
+    app.kubernetes.io/name: train-db-migrate
+spec:
+  # Bounded on both axes: at most 4 retries of the pod, and the whole Job is
+  # killed and marked Failed after 10 minutes regardless of retries.
+  backoffLimit: 4
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: train-db-migrate
+    spec:
+      restartPolicy: OnFailure
+      # psql does not need root; 999 is the `postgres` user of the image.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+      # Replacement for compose `depends_on: service_healthy`: block until the
+      # database accepts connections, for at most 60 x 2 s = 2 minutes.
+      initContainers:
+        - name: wait-for-postgres-train
+          image: postgres:16
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              attempt=0
+              until pg_isready -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDATABASE"; do
+                attempt=$((attempt + 1))
+                if [ "$attempt" -ge 60 ]; then
+                  echo "postgres-train not ready after $attempt attempts, giving up" >&2
+                  exit 1
+                fi
+                echo "waiting for postgres-train ($attempt/60)..."
+                sleep 2
+              done
+          env:
+            - name: PGHOST
+              value: postgres-train
+            - name: PGPORT
+              value: "5432"
+            - name: PGDATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-train-credentials
+                  key: POSTGRES_DB
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-train-credentials
+                  key: POSTGRES_USER
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-train-credentials
+                  key: POSTGRES_PASSWORD
+      containers:
+        - name: migrate
+          image: postgres:16
+          command: ["sh", "/database/migrate.sh"]
+          env:
+            - name: PGHOST
+              value: postgres-train
+            - name: PGPORT
+              value: "5432"
+            - name: PGDATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-train-credentials
+                  key: POSTGRES_DB
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-train-credentials
+                  key: POSTGRES_USER
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-train-credentials
+                  key: POSTGRES_PASSWORD
+            # The ConfigMap is flat (file basenames as keys), so the SQL files
+            # sit next to migrate.sh instead of under /database/migrations.
+            - name: MIGRATIONS_DIR
+              value: /database
+          volumeMounts:
+            - name: migrations
+              mountPath: /database
+              readOnly: true
+      volumes:
+        - name: migrations
+          configMap:
+            name: train-db-migrations
+            # Read-only is enough: the script is run through `sh`, not executed.
+            defaultMode: 0444
