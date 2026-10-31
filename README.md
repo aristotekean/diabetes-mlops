@@ -23,7 +23,7 @@ apps/            servicios propios: api-inference (FastAPI), frontend (Streamlit
 ml/              paquete python compartido con la lógica del modelo
 notebooks/       análisis exploratorio que justifica el procesamiento
 infra/database/  migraciones SQL de las capas RAW, CLEAN e INFERENCE
-infra/k8s/       manifiestos kustomize por servicio
+infra/k8s/       manifiestos kustomize de Server A (ver "Despliegue en Kubernetes")
 infra/monitoring observabilidad con Prometheus y Grafana (Server C)
 infra/load-testing  pruebas de carga con Locust (Server B)
 ```
@@ -62,6 +62,128 @@ Para levantar el stack en un **servidor o VM Linux**, copia `.env.example` a
 
 Luego `docker compose up -d` descarga las imágenes publicadas
 (`docker compose up -d --build` las construye en el propio servidor).
+
+## Despliegue en Kubernetes (OrbStack)
+
+`infra/k8s` despliega Server A completo (S1–S7 e Ingress) con kustomize sobre
+el Kubernetes integrado de OrbStack. Usa las mismas imágenes publicadas en
+Docker Hub (`aristotekean/diabetes-*:0.1.0`): no hace falta construir nada en
+local.
+
+### Requisitos
+
+| Requisito | Detalle |
+|-----------|---------|
+| OrbStack con Kubernetes habilitado | Settings → Kubernetes. Trae `kubectl` y la StorageClass `local-path`. |
+| Ingress controller | OrbStack no incluye ninguno. Instala ingress-nginx desde el manifiesto oficial (abajo). |
+| Salida a Internet desde el clúster | Docker Hub para las imágenes y Google Drive para el dataset. |
+
+Instalación del Ingress controller (una sola vez por clúster, versión fijada):
+
+```bash
+kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.15.1/deploy/static/provider/cloud/deploy.yaml
+kubectl -n ingress-nginx rollout status deploy/ingress-nginx-controller --timeout=180s
+```
+
+El Service `ingress-nginx-controller` es de tipo `LoadBalancer`; OrbStack le
+asigna una IP y resuelve cualquier `*.k8s.orb.local` hacia ella desde el Mac.
+
+### Despliegue
+
+```bash
+kubectl apply -k infra/k8s          # crea o actualiza todo
+kubectl -n diabetes get pods        # espera a ver Running y Completed
+kubectl -n diabetes get ingress     # el ADDRESS tarda unos segundos en aparecer
+```
+
+Todo queda en el namespace `diabetes`:
+
+| Recurso | Qué es |
+|---------|--------|
+| `mlflow-db`, `minio`, `mlflow` | S1 PostgreSQL de MLflow, S3 MinIO (bucket `mlflow`), S2 MLflow tracking server |
+| `postgres-train` | S5 PostgreSQL con los esquemas `raw`, `clean` e `inference` |
+| `api-inference`, `frontend` | S4 FastAPI y S7 Streamlit |
+| `airflow-db`, `airflow` | PostgreSQL de metadatos y S6 Airflow en un solo pod (api-server, scheduler, dag-processor, triggerer) |
+| Jobs `minio-init`, `train-db-migrate`, `airflow-init` | Crean el bucket, aplican las migraciones SQL y migran la base de Airflow (equivalen a los one-shot de compose) |
+| Ingress `diabetes` | Enrutamiento por host hacia los cuatro servicios HTTP |
+
+Los pods dependientes esperan con `initContainers` a que su base de datos y su
+Job estén listos, así que el primer arranque tarda unos minutos.
+
+### Acceso
+
+| URL | Servicio | Credenciales de desarrollo |
+|-----|----------|----------------------------|
+| http://frontend.k8s.orb.local | Streamlit | — |
+| http://api.k8s.orb.local | API de inferencia (`/docs`, `/health`, `/model-info`, `/predict`) | — |
+| http://mlflow.k8s.orb.local | MLflow UI | — |
+| http://airflow.k8s.orb.local | Airflow UI | `airflow` / `airflow` |
+
+Cualquier Service también responde desde el Mac por su nombre interno, p. ej.
+`http://mlflow.diabetes.svc.cluster.local:5000` o
+`http://minio.diabetes.svc.cluster.local:9001` (consola de MinIO,
+`minioadmin` / `minioadmin`).
+
+### Primer entrenamiento
+
+El DAG `diabetes_incremental_training` se crea **pausado**. Para obtener el
+primer modelo basta con activarlo: el scheduler lanza enseguida la corrida del
+intervalo anterior (sin catchup del resto). Si no quieres esperar, puedes
+además dispararlo a mano; ten en cuenta que cada corrida carga un lote nuevo.
+
+```bash
+kubectl -n diabetes exec deploy/airflow -c scheduler -- airflow dags unpause diabetes_incremental_training
+kubectl -n diabetes exec deploy/airflow -c scheduler -- airflow dags trigger diabetes_incremental_training   # opcional
+kubectl -n diabetes exec deploy/airflow -c scheduler -- airflow dags list-runs -d diabetes_incremental_training
+```
+
+La ejecución descarga el dataset al volumen persistente, carga el primer lote,
+entrena y registra `models:/diabetes@production` en MLflow (alrededor de un
+minuto por corrida con 15.000 filas por lote). La
+API recarga el modelo sola cada 60 s (`MODEL_REFRESH_SECONDS`); para forzarlo,
+`curl -X POST http://api.k8s.orb.local/model/reload`. Comprueba:
+
+```bash
+curl http://api.k8s.orb.local/model-info            # "status": "available"
+curl -X POST http://api.k8s.orb.local/predict \
+  -H 'content-type: application/json' -d @payload.json   # ejemplo en apps/api-inference/README.md
+```
+
+Mientras el DAG esté activo, el scheduler lo ejecuta cada 10 minutos
+(`DIABETES_TRAINING_SCHEDULE`) y cada corrida carga un lote nuevo y reentrena.
+En un portátil conviene volver a pausarlo tras la primera corrida y
+reactivarlo solo cuando quieras seguir con la carga incremental:
+
+```bash
+kubectl -n diabetes exec deploy/airflow -c scheduler -- airflow dags pause diabetes_incremental_training
+```
+
+### Operación
+
+| Tarea | Cómo |
+|-------|------|
+| Cambiar una migración SQL | Edita `infra/database/migrations`, ejecuta `bash infra/k8s/scripts/render-migrations.sh` y commitea el ConfigMap generado. `--check` falla si está desactualizado (pensado para CI). |
+| Publicar una versión nueva | Cambia `newTag` en el bloque `images:` de `infra/k8s/kustomization.yaml` y vuelve a aplicar. |
+| Reaplicar tras cambiar la imagen de un Job | Los Jobs son inmutables: `kubectl -n diabetes delete job minio-init train-db-migrate airflow-init` y después `kubectl apply -k infra/k8s`. |
+| Borrar todo | `kubectl delete -k infra/k8s` (los PVC y sus datos se eliminan con el namespace). |
+
+> **Credenciales de desarrollo.** Los Secrets llevan los mismos valores por
+> defecto que compose (`minioadmin`, `airflow`, contraseñas `app`/`mlflow`).
+> Son para un clúster local; cámbialos antes de exponer el clúster a otras
+> máquinas.
+
+### En un servidor Linux
+
+- Los hosts `*.k8s.orb.local` solo existen en OrbStack. En
+  `infra/k8s/base/ingress/ingress.yaml` sustitúyelos por el nombre Tailscale
+  (o la IP) del nodo, uno por servicio o con prefijos de ruta.
+- Añade ese host a `MLFLOW_ALLOWED_HOSTS` en
+  `infra/k8s/base/mlflow/deployment.yaml` (p. ej. `mlflow.<nodo>.ts.net:*`);
+  sin eso MLflow responde 403 desde otra máquina.
+- La opción "Expose services to local network devices" es exclusiva de OrbStack:
+  sin ella los LoadBalancer y NodePort solo se alcanzan desde el propio Mac. En
+  un servidor, expón el controller con el LoadBalancer de tu clúster o un
+  NodePort y apunta el DNS de Tailscale a él.
 
 ## Dataset
 

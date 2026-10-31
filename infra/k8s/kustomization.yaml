@@ -34,6 +34,7 @@ resources:
   - base/frontend
   - base/postgres-airflow
   - base/airflow
+  - base/ingress
 
 # Published multi-arch (amd64 + arm64) images built from this repository.
 # The service manifests (base/api-inference, base/frontend, base/airflow)
