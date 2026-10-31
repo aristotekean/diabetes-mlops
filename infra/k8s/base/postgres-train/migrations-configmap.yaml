@@ -1,0 +1,175 @@
+# GENERATED FILE - DO NOT EDIT BY HAND.
+#
+# Rendered from infra/database (migrate.sh + migrations/*.sql) by
+# infra/k8s/scripts/render-migrations.sh. Re-run that script and commit the
+# result whenever infra/database changes; `--check` reports drift.
+#
+# Data keys are file basenames, so migrate.sh and every *.sql end up side by
+# side under the mount point. The train-db-migrate Job mounts this ConfigMap at
+# /database and sets MIGRATIONS_DIR=/database to match that flat layout.
+apiVersion: v1
+data:
+  001_create_data_contract.sql: |
+    CREATE SCHEMA IF NOT EXISTS raw;
+    CREATE SCHEMA IF NOT EXISTS clean;
+    CREATE SCHEMA IF NOT EXISTS inference;
+
+    CREATE TABLE IF NOT EXISTS raw.load_batches (
+        batch_id UUID PRIMARY KEY,
+        source_file TEXT NOT NULL,
+        source_uri TEXT NOT NULL,
+        source_sha256 CHAR(64) NOT NULL,
+        batch_number INTEGER NOT NULL CHECK (batch_number > 0),
+        expected_record_count INTEGER NOT NULL
+            CHECK (expected_record_count BETWEEN 1 AND 15000),
+        loaded_record_count INTEGER NOT NULL DEFAULT 0
+            CHECK (loaded_record_count BETWEEN 0 AND 15000),
+        status TEXT NOT NULL DEFAULT 'pending'
+            CHECK (status IN ('pending', 'loading', 'completed', 'failed')),
+        started_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        completed_at TIMESTAMPTZ,
+        error_message TEXT,
+        CONSTRAINT uq_load_batches_source_batch
+            UNIQUE (source_sha256, batch_number),
+        CONSTRAINT ck_load_batches_completion
+            CHECK (
+                (status = 'completed' AND completed_at IS NOT NULL
+                    AND loaded_record_count = expected_record_count)
+                OR (status <> 'completed' AND completed_at IS NULL)
+            )
+    );
+
+    CREATE TABLE IF NOT EXISTS raw.records (
+        raw_record_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        batch_id UUID NOT NULL REFERENCES raw.load_batches (batch_id),
+        source_sha256 CHAR(64) NOT NULL,
+        source_row_number BIGINT NOT NULL CHECK (source_row_number > 0),
+        source_record_sha256 CHAR(64) NOT NULL,
+        encounter_id TEXT NOT NULL,
+        record_data JSONB NOT NULL CHECK (jsonb_typeof(record_data) = 'object'),
+        status TEXT NOT NULL DEFAULT 'loaded'
+            CHECK (status IN ('loaded', 'validated', 'rejected')),
+        loaded_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT uq_raw_source_row UNIQUE (source_sha256, source_row_number)
+    );
+
+    CREATE INDEX IF NOT EXISTS ix_raw_records_batch_id
+        ON raw.records (batch_id);
+    CREATE INDEX IF NOT EXISTS ix_raw_records_status
+        ON raw.records (status);
+
+    CREATE TABLE IF NOT EXISTS clean.records (
+        clean_record_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        raw_record_id BIGINT NOT NULL REFERENCES raw.records (raw_record_id),
+        transformation_version TEXT NOT NULL,
+        features JSONB NOT NULL CHECK (jsonb_typeof(features) = 'object'),
+        target_readmitted TEXT NOT NULL
+            CHECK (target_readmitted IN ('NO', '>30', '<30')),
+        data_split TEXT NOT NULL
+            CHECK (data_split IN ('train', 'validation', 'test')),
+        processed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT uq_clean_record_transform
+            UNIQUE (raw_record_id, transformation_version)
+    );
+
+    CREATE INDEX IF NOT EXISTS ix_clean_records_split_version
+        ON clean.records (transformation_version, data_split);
+
+    CREATE TABLE IF NOT EXISTS inference.logs (
+        request_id UUID PRIMARY KEY,
+        requested_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        input_data JSONB NOT NULL CHECK (jsonb_typeof(input_data) = 'object'),
+        prediction JSONB,
+        probabilities JSONB
+            CHECK (probabilities IS NULL OR jsonb_typeof(probabilities) = 'object'),
+        model_name TEXT,
+        model_version TEXT,
+        model_alias TEXT,
+        processing_time_ms DOUBLE PRECISION
+            CHECK (processing_time_ms IS NULL OR processing_time_ms >= 0),
+        status TEXT NOT NULL CHECK (status IN ('succeeded', 'failed')),
+        error_code TEXT,
+        error_message TEXT,
+        CONSTRAINT ck_inference_log_result
+            CHECK (
+                (status = 'succeeded' AND prediction IS NOT NULL
+                    AND model_name IS NOT NULL AND model_version IS NOT NULL
+                    AND processing_time_ms IS NOT NULL AND error_code IS NULL)
+                OR (status = 'failed' AND error_code IS NOT NULL)
+            )
+    );
+
+    CREATE INDEX IF NOT EXISTS ix_inference_logs_requested_at
+        ON inference.logs (requested_at DESC);
+    CREATE INDEX IF NOT EXISTS ix_inference_logs_model
+        ON inference.logs (model_name, model_version);
+  002_incremental_pipeline.sql: |
+    -- Incremental pipeline: per-row RAW validation, CLEAN exclusions, split
+    -- assignment after storage, and a staging table between preprocessing and
+    -- the CLEAN merge. Safe to re-run.
+
+    ALTER TABLE raw.load_batches ADD COLUMN IF NOT EXISTS dag_run_id TEXT;
+
+    ALTER TABLE raw.records ADD COLUMN IF NOT EXISTS status_reason TEXT;
+    ALTER TABLE raw.records ADD COLUMN IF NOT EXISTS validated_at TIMESTAMPTZ;
+    ALTER TABLE raw.records DROP CONSTRAINT IF EXISTS ck_raw_records_rejection_reason;
+    ALTER TABLE raw.records ADD CONSTRAINT ck_raw_records_rejection_reason
+        CHECK (status <> 'rejected' OR status_reason IS NOT NULL);
+    CREATE INDEX IF NOT EXISTS ix_raw_records_encounter_id
+        ON raw.records (encounter_id);
+
+    -- A CLEAN row is either excluded from training (with a reason and no split)
+    -- or eligible; eligible rows get their split from the split task.
+    ALTER TABLE clean.records ADD COLUMN IF NOT EXISTS exclusion_reason TEXT;
+    ALTER TABLE clean.records ALTER COLUMN data_split DROP NOT NULL;
+    ALTER TABLE clean.records DROP CONSTRAINT IF EXISTS ck_clean_records_excluded_split;
+    ALTER TABLE clean.records ADD CONSTRAINT ck_clean_records_excluded_split
+        CHECK (exclusion_reason IS NULL OR data_split IS NULL);
+
+    CREATE TABLE IF NOT EXISTS clean.records_staging (
+        dag_run_id TEXT NOT NULL,
+        raw_record_id BIGINT NOT NULL REFERENCES raw.records (raw_record_id),
+        transformation_version TEXT NOT NULL,
+        features JSONB NOT NULL CHECK (jsonb_typeof(features) = 'object'),
+        target_readmitted TEXT NOT NULL
+            CHECK (target_readmitted IN ('NO', '>30', '<30')),
+        exclusion_reason TEXT,
+        staged_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (dag_run_id, raw_record_id, transformation_version)
+    );
+  migrate.sh: |
+    #!/bin/sh
+    # Apply pending SQL migrations to the training database, in file-name order.
+    #
+    # Each file runs in its own transaction and is recorded in
+    # public.schema_migrations, so re-running only applies new files. Connection
+    # settings come from the standard libpq variables (PGHOST, PGPORT, PGDATABASE,
+    # PGUSER, PGPASSWORD); MIGRATIONS_DIR defaults to the folder next to this file.
+    set -eu
+
+    MIGRATIONS_DIR="${MIGRATIONS_DIR:-$(dirname "$0")/migrations}"
+
+    psql -v ON_ERROR_STOP=1 -q -c "
+    CREATE TABLE IF NOT EXISTS public.schema_migrations (
+        version TEXT PRIMARY KEY,
+        applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );"
+
+    for file in "$MIGRATIONS_DIR"/*.sql; do
+        version="$(basename "$file" .sql)"
+        applied="$(psql -tA -v ON_ERROR_STOP=1 \
+            -c "SELECT 1 FROM public.schema_migrations WHERE version = '$version'")"
+        if [ "$applied" = "1" ]; then
+            echo "already applied: $version"
+            continue
+        fi
+        psql -v ON_ERROR_STOP=1 -q --single-transaction \
+            -f "$file" \
+            -c "INSERT INTO public.schema_migrations (version) VALUES ('$version')"
+        echo "applied: $version"
+    done
+kind: ConfigMap
+metadata:
+  name: train-db-migrations
+  labels:
+    app.kubernetes.io/name: train-db-migrate

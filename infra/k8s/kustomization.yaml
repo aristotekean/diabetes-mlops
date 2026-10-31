@@ -8,8 +8,9 @@
 #
 # Everything lands in the `diabetes` namespace. Project images are pinned here
 # in one place (`images:`) so a release only bumps the three newTag values.
-# Third-party images (postgres, minio, mlflow) are pinned in their own
-# manifests to match docker-compose.yml.
+# Third-party images follow docker-compose.yml: postgres and mlflow are pinned
+# in their own manifests; MinIO deliberately tracks
+# `cgr.dev/chainguard/minio:latest` (pinning it is out of scope for now).
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
@@ -28,10 +29,14 @@ resources:
   - base/postgres-mlflow
   - base/minio
   - base/mlflow
+  - base/postgres-train
+  - base/api-inference
+  - base/frontend
 
 # Published multi-arch (amd64 + arm64) images built from this repository.
-# They are referenced by name only inside the service manifests; the tag is
-# set here.
+# The service manifests (base/api-inference, base/frontend, later base/airflow)
+# reference them by name without a tag; kustomize rewrites each matching image
+# to name:newTag here, so this block is the single place to bump a release.
 images:
   - name: aristotekean/diabetes-api-inference
     newTag: "0.1.0"
