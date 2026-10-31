@@ -4,10 +4,13 @@
 # entrypoint, libpq PG* variables from the Secret.
 #
 # migrate.sh records applied files in public.schema_migrations, so re-running
-# the Job is safe. A Job spec is immutable once created and a changed ConfigMap
-# does not re-trigger it; to apply NEW migrations on a running cluster:
+# the Job is safe. A Job's pod template is immutable once created and a changed
+# ConfigMap does not re-trigger it. Finished Jobs are garbage-collected after
+# ttlSecondsAfterFinished, so a later `kubectl apply -k infra/k8s` recreates
+# (and re-runs) the Job instead of failing with "field is immutable". To apply
+# NEW migrations on a running cluster:
 #   bash infra/k8s/scripts/render-migrations.sh
-#   kubectl -n diabetes delete job train-db-migrate
+#   kubectl -n diabetes delete job train-db-migrate   # only if it still exists
 #   kubectl apply -k infra/k8s
 apiVersion: batch/v1
 kind: Job
@@ -17,9 +20,14 @@ metadata:
     app.kubernetes.io/name: train-db-migrate
 spec:
   # Bounded on both axes: at most 4 retries of the pod, and the whole Job is
-  # killed and marked Failed after 10 minutes regardless of retries.
+  # killed and marked Failed after 20 minutes regardless of retries. The
+  # deadline also covers scheduling, the image pull and the wait below for
+  # postgres-train's own first-start initdb, not just the SQL itself.
   backoffLimit: 4
-  activeDeadlineSeconds: 600
+  activeDeadlineSeconds: 1200
+  # Keep the finished Job (and its logs) for 10 minutes, then let the TTL
+  # controller delete it so the next apply can recreate it.
+  ttlSecondsAfterFinished: 600
   template:
     metadata:
       labels:

@@ -116,6 +116,18 @@ spec:
             - secretRef:
                 name: minio-credentials
           env:
+            # S5 training database identity, from the same Secret api-inference
+            # uses (host/port are plain config in `airflow-env`).
+            - name: TRAIN_DB_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-train-credentials
+                  key: POSTGRES_DB
+            - name: TRAIN_DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-train-credentials
+                  key: POSTGRES_USER
             - name: TRAIN_DB_PASSWORD
               valueFrom:
                 secretKeyRef:
@@ -174,6 +186,18 @@ spec:
             - secretRef:
                 name: minio-credentials
           env:
+            # S5 training database identity, from the same Secret api-inference
+            # uses (host/port are plain config in `airflow-env`).
+            - name: TRAIN_DB_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-train-credentials
+                  key: POSTGRES_DB
+            - name: TRAIN_DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-train-credentials
+                  key: POSTGRES_USER
             - name: TRAIN_DB_PASSWORD
               valueFrom:
                 secretKeyRef:
@@ -223,6 +247,18 @@ spec:
             - secretRef:
                 name: minio-credentials
           env:
+            # S5 training database identity, from the same Secret api-inference
+            # uses (host/port are plain config in `airflow-env`).
+            - name: TRAIN_DB_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-train-credentials
+                  key: POSTGRES_DB
+            - name: TRAIN_DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-train-credentials
+                  key: POSTGRES_USER
             - name: TRAIN_DB_PASSWORD
               valueFrom:
                 secretKeyRef:
@@ -233,13 +269,17 @@ spec:
               mountPath: /opt/airflow/logs
             - name: airflow-dataset
               mountPath: /opt/airflow/data/Diabetes
+          # The exec liveness probe below runs the Airflow CLI inside this
+          # cgroup: importing Airflow costs a few hundred MB on top of the
+          # process itself, so the limit leaves headroom for both (requests
+          # stay low; the headroom is only used while the probe runs).
           resources:
             requests:
               cpu: 150m
               memory: 256Mi
             limits:
               cpu: 250m
-              memory: 512Mi
+              memory: 768Mi
           livenessProbe:
             exec:
               command:
@@ -266,6 +306,18 @@ spec:
             - secretRef:
                 name: minio-credentials
           env:
+            # S5 training database identity, from the same Secret api-inference
+            # uses (host/port are plain config in `airflow-env`).
+            - name: TRAIN_DB_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-train-credentials
+                  key: POSTGRES_DB
+            - name: TRAIN_DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-train-credentials
+                  key: POSTGRES_USER
             - name: TRAIN_DB_PASSWORD
               valueFrom:
                 secretKeyRef:
@@ -276,13 +328,14 @@ spec:
               mountPath: /opt/airflow/logs
             - name: airflow-dataset
               mountPath: /opt/airflow/data/Diabetes
+          # Same headroom as dag-processor for the exec CLI probe.
           resources:
             requests:
               cpu: 100m
               memory: 256Mi
             limits:
               cpu: 250m
-              memory: 512Mi
+              memory: 768Mi
           livenessProbe:
             exec:
               command:

@@ -35,15 +35,25 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/postgresql/data
+          # POSTGRES_USER / POSTGRES_DB come from the Secret through envFrom.
+          # The kubelet expands $(VAR) in exec probes only from env entries
+          # with a literal `value`, so the probes go through `sh -c` and let
+          # the shell read them instead of repeating the values as literals.
           readinessProbe:
             exec:
-              command: ["pg_isready", "-U", "mlflow", "-d", "mlflow"]
+              command:
+                - /bin/sh
+                - -c
+                - pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
             initialDelaySeconds: 5
             periodSeconds: 10
             timeoutSeconds: 5
           livenessProbe:
             exec:
-              command: ["pg_isready", "-U", "mlflow", "-d", "mlflow"]
+              command:
+                - /bin/sh
+                - -c
+                - pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
             initialDelaySeconds: 30
             periodSeconds: 10
             timeoutSeconds: 5

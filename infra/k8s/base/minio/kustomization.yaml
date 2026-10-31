@@ -3,7 +3,8 @@
 #
 # Chainguard build of MinIO (MinIO removed its own public images in 2026-09).
 # Distroless-style image: runs as uid 65532 and ships `minio`, `mc` and a
-# minimal `/bin/sh` only (no curl/wget), hence the HTTP probes below.
+# minimal `/bin/sh` only (no curl/wget), hence the kubelet-side httpGet probes
+# in deployment.yaml and the `mc`-based wait in job-init.yaml.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 

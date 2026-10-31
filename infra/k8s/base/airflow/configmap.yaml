@@ -12,17 +12,20 @@ data:
   AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
   AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
   AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-  # Task runners reach the api-server through the Service of the same name
-  # (service.yaml); the path must keep its trailing slash.
-  AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-apiserver:8080/execution/
+  # Task runners (subprocesses of the scheduler) call the execution API of the
+  # api-server container in the SAME pod, so localhost is used instead of the
+  # `airflow-apiserver` Service: it does not depend on that Service's
+  # readiness gate and never leaves the pod. The Service stays for the Ingress
+  # and the UI. The path must keep its trailing slash.
+  AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://localhost:8080/execution/
   # Lets /api/v2/monitor/health report the scheduler heartbeat.
   AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
   # S5 · training database the DAGs read from and write to (base/postgres-train).
-  # The password comes from the `postgres-train-credentials` Secret.
+  # Database name, user and password come from the `postgres-train-credentials`
+  # Secret (TRAIN_DB_NAME / TRAIN_DB_USER / TRAIN_DB_PASSWORD env entries in
+  # deployment.yaml), the same source api-inference uses.
   TRAIN_DB_HOST: postgres-train
   TRAIN_DB_PORT: "5432"
-  TRAIN_DB_NAME: diabetes
-  TRAIN_DB_USER: app
   # The DAG downloads the CSV here on first run (pvc.yaml); the directory needs
   # outbound HTTPS to Google Drive.
   DIABETES_DATASET_PATH: /opt/airflow/data/Diabetes/Diabetes.csv

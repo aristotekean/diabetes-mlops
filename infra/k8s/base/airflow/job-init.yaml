@@ -12,7 +12,13 @@
 #
 # compose runs this step as root only to chown bind mounts; here no volume is
 # mounted and the image already owns /opt/airflow, so it runs as the airflow
-# user (uid 50000, gid 0). Re-running is safe: delete the Job and apply again.
+# user (uid 50000, gid 0). Re-running is safe.
+#
+# A Job's pod template is immutable once created, and the root `images:` block
+# rewrites this image tag. Finished Jobs are garbage-collected after
+# ttlSecondsAfterFinished, so a later `kubectl apply -k infra/k8s` recreates
+# (and re-runs) the Job instead of failing with "field is immutable"; within
+# that window, delete it by hand before applying.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -26,6 +32,9 @@ spec:
   # and the wait for airflow-db below.
   backoffLimit: 4
   activeDeadlineSeconds: 900
+  # Keep the finished Job (and its logs) for 10 minutes, then let the TTL
+  # controller delete it so the next apply can recreate it.
+  ttlSecondsAfterFinished: 600
   template:
     metadata:
       labels:

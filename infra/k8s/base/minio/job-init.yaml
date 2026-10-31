@@ -2,6 +2,11 @@
 # it ships `mc`. There is no `depends_on` in Kubernetes, so the script retries
 # `mc alias set` (which probes the server) until MinIO answers, then creates
 # the bucket idempotently. Re-running the Job on an existing bucket is a no-op.
+#
+# A Job's pod template is immutable once created. Finished Jobs are
+# garbage-collected after ttlSecondsAfterFinished, so a later
+# `kubectl apply -k infra/k8s` recreates (and re-runs) the Job instead of
+# failing with "field is immutable"; within that window, delete it by hand.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -9,7 +14,14 @@ metadata:
   labels:
     app.kubernetes.io/name: minio-init
 spec:
+  # Bounded on both axes: at most 6 retries of the pod, and the whole Job is
+  # killed and marked Failed after 10 minutes regardless of retries. The
+  # deadline also covers scheduling, the image pull and the wait below.
   backoffLimit: 6
+  activeDeadlineSeconds: 600
+  # Keep the finished Job (and its logs) for 10 minutes, then let the TTL
+  # controller delete it so the next apply can recreate it.
+  ttlSecondsAfterFinished: 600
   template:
     metadata:
       labels:
@@ -26,8 +38,16 @@ spec:
           args:
             - |
               set -eu
-              until mc alias set local http://minio:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD"; do
-                echo "waiting for minio..."
+              # Bounded wait: 40 x 3 s = 2 minutes. mc's own errors stay on
+              # stderr so the reason for waiting is visible in the Job logs.
+              attempt=0
+              until mc alias set local http://minio:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null; do
+                attempt=$((attempt + 1))
+                if [ "$attempt" -ge 40 ]; then
+                  echo "minio not reachable at http://minio:9000 after $attempt attempts, giving up" >&2
+                  exit 1
+                fi
+                echo "waiting for minio ($attempt/40)..."
                 sleep 3
               done
               mc mb --ignore-existing local/mlflow

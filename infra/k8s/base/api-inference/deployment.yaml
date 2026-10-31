@@ -22,11 +22,20 @@ spec:
         app.kubernetes.io/name: api-inference
     spec:
       # Replacement for compose `depends_on` on postgres-train (healthy) and
-      # train-db-migrate (completed). Both loops are bounded; on exhaustion the
-      # init container fails and Kubernetes restarts it with backoff, which
-      # keeps the pod visibly in Init:Error instead of looping silently.
+      # train-db-migrate (completed), as one init container in two phases so
+      # the connection settings are declared once. Both loops are bounded; on
+      # exhaustion the init container fails and Kubernetes restarts it with
+      # backoff, which keeps the pod visibly in Init:Error instead of looping
+      # silently.
+      #
+      # Phase 2 gates on the LAST migration file of the same ConfigMap the Job
+      # mounts: migrate.sh applies `*.sql` in name order and records each file
+      # name without `.sql` in public.schema_migrations, so the newest version
+      # being present means every migration this release ships has run. psql
+      # errors (table missing, connection refused) stay on stderr so the reason
+      # for waiting is visible in the init container logs.
       initContainers:
-        - name: wait-for-postgres-train
+        - name: wait-for-migrations
           image: postgres:16
           command: ["/bin/sh", "-c"]
           args:
@@ -42,52 +51,35 @@ spec:
                 echo "waiting for postgres-train ($attempt/60)..."
                 sleep 2
               done
-          env:
-            - name: PGHOST
-              value: postgres-train
-            - name: PGPORT
-              value: "5432"
-            - name: PGDATABASE
-              valueFrom:
-                secretKeyRef:
-                  name: postgres-train-credentials
-                  key: POSTGRES_DB
-            - name: PGUSER
-              valueFrom:
-                secretKeyRef:
-                  name: postgres-train-credentials
-                  key: POSTGRES_USER
-            - name: PGPASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: postgres-train-credentials
-                  key: POSTGRES_PASSWORD
-          securityContext:
-            runAsNonRoot: true
-            runAsUser: 999
-            runAsGroup: 999
-        # The migration Job creates public.schema_migrations and inserts one
-        # row per applied file; a row count >= 1 means the schemas exist.
-        # psql errors (table missing, connection refused) stay on stderr so
-        # the reason for waiting is visible in the init container logs.
-        - name: wait-for-migrations
-          image: postgres:16
-          command: ["/bin/sh", "-c"]
-          args:
-            - |
-              set -eu
+
+              # Same glob and ordering as migrate.sh; the loop leaves the last
+              # file in $latest.
+              latest=""
+              for file in /database/*.sql; do
+                latest="$(basename "$file" .sql)"
+              done
+              if [ -z "$latest" ]; then
+                echo "no *.sql in the train-db-migrations ConfigMap, nothing to wait for" >&2
+                exit 1
+              fi
+              echo "expecting migration version: $latest"
               attempt=0
-              until applied="$(psql -tA -v ON_ERROR_STOP=1 -c 'SELECT count(*) FROM public.schema_migrations')" \
-                && [ "${applied:-0}" -ge 1 ]; do
+              until applied="$(psql -tA -v ON_ERROR_STOP=1 \
+                    -c "SELECT 1 FROM public.schema_migrations WHERE version = '$latest'")" \
+                && [ "$applied" = "1" ]; do
                 attempt=$((attempt + 1))
                 if [ "$attempt" -ge 90 ]; then
-                  echo "migrations not applied after $attempt attempts (job/train-db-migrate), giving up" >&2
+                  echo "migration $latest not applied after $attempt attempts (job/train-db-migrate), giving up" >&2
                   exit 1
                 fi
-                echo "waiting for job/train-db-migrate ($attempt/90)..."
+                echo "waiting for job/train-db-migrate to apply $latest ($attempt/90)..."
                 sleep 2
               done
-              echo "migrations applied: $applied"
+              echo "migrations applied up to: $latest"
+          volumeMounts:
+            - name: migrations
+              mountPath: /database
+              readOnly: true
           env:
             - name: PGHOST
               value: postgres-train
@@ -187,3 +179,10 @@ spec:
             periodSeconds: 15
             timeoutSeconds: 5
             failureThreshold: 5
+      volumes:
+        # Same ConfigMap the train-db-migrate Job mounts, read here only to
+        # learn which migration version to wait for.
+        - name: migrations
+          configMap:
+            name: train-db-migrations
+            defaultMode: 0444
