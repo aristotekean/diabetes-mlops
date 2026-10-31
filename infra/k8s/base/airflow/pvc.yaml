@@ -1,0 +1,16 @@
+# Replaces the ../../data/Diabetes bind mount of apps/airflow/compose.yml: the
+# training DAG downloads Diabetes.csv (about 20 MB) into this volume on its
+# first run and re-reads it afterwards, so it must survive pod restarts.
+#
+# No storageClassName: the cluster default is used (OrbStack: `local-path`,
+# bound when the first pod is scheduled).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: airflow-dataset
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi

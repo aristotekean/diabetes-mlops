@@ -1,0 +1,16 @@
+# Web UI and REST API of the api-server container. The name is part of the
+# configuration: AIRFLOW__CORE__EXECUTION_API_SERVER_URL in configmap.yaml and
+# the compose hostname both point at `airflow-apiserver:8080`.
+apiVersion: v1
+kind: Service
+metadata:
+  name: airflow-apiserver
+  labels:
+    app.kubernetes.io/name: airflow
+spec:
+  selector:
+    app.kubernetes.io/name: airflow
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

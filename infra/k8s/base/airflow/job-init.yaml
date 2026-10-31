@@ -1,0 +1,103 @@
+# One-shot: migrate the Airflow metadata database and create the admin user.
+# Mirrors the `airflow-init` service in apps/airflow/compose.yml: the official
+# image entrypoint runs `airflow db migrate` when _AIRFLOW_DB_MIGRATE=true and
+# `airflow users create` when _AIRFLOW_WWW_USER_CREATE=true, before executing
+# the command passed to it.
+#
+# The entrypoint ignores migration and user-creation failures (`|| true`), so
+# instead of compose's `airflow version` the command is
+# `airflow db check-migrations`: it only exits 0 once the schema is at the
+# latest revision, which makes `Job Complete` a real signal. An existing admin
+# user on a re-run is logged by `users create` and is not an error.
+#
+# compose runs this step as root only to chown bind mounts; here no volume is
+# mounted and the image already owns /opt/airflow, so it runs as the airflow
+# user (uid 50000, gid 0). Re-running is safe: delete the Job and apply again.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: airflow-init
+  labels:
+    app.kubernetes.io/name: airflow-init
+spec:
+  # Bounded on both axes: at most 4 retries of the pod, and the whole Job is
+  # killed and marked Failed after 15 minutes regardless of retries. The
+  # deadline also covers scheduling, the image pull (about 1 GB on first use)
+  # and the wait for airflow-db below.
+  backoffLimit: 4
+  activeDeadlineSeconds: 900
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: airflow-init
+    spec:
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 50000
+        runAsGroup: 0
+      # Replacement for compose `depends_on: airflow-db (healthy)`: the
+      # entrypoint only waits for the database on the long-running commands,
+      # not for `db` ones. Bounded to 60 x 2 s = 2 minutes.
+      initContainers:
+        - name: wait-for-airflow-db
+          image: postgres:16
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              attempt=0
+              until pg_isready -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDATABASE"; do
+                attempt=$((attempt + 1))
+                if [ "$attempt" -ge 60 ]; then
+                  echo "airflow-db not ready after $attempt attempts, giving up" >&2
+                  exit 1
+                fi
+                echo "waiting for airflow-db ($attempt/60)..."
+                sleep 2
+              done
+          env:
+            - name: PGHOST
+              value: airflow-db
+            - name: PGPORT
+              value: "5432"
+            - name: PGDATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: airflow-db-credentials
+                  key: POSTGRES_DB
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef:
+                  name: airflow-db-credentials
+                  key: POSTGRES_USER
+          # 999 is the `postgres` user of the image; pg_isready needs no root.
+          securityContext:
+            runAsUser: 999
+            runAsGroup: 999
+      containers:
+        - name: init
+          image: aristotekean/diabetes-airflow
+          imagePullPolicy: IfNotPresent
+          # No `command`: the image ENTRYPOINT (dumb-init + /entrypoint) runs
+          # the migration and user creation, then `exec airflow <args>`.
+          args: ["db", "check-migrations", "--migration-wait-timeout", "60"]
+          envFrom:
+            - configMapRef:
+                name: airflow-env
+            - secretRef:
+                name: airflow-secrets
+            - secretRef:
+                name: airflow-admin-user
+          env:
+            - name: _AIRFLOW_DB_MIGRATE
+              value: "true"
+            - name: _AIRFLOW_WWW_USER_CREATE
+              value: "true"
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
