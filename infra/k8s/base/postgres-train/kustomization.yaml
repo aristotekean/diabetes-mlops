@@ -1,0 +1,16 @@
+# S5 · PostgreSQL training database (RAW, CLEAN and INFERENCE schemas) plus
+# the one-shot `train-db-migrate` Job that applies infra/database migrations.
+# Reached as `postgres-train` (same hostname as in apps/airflow/compose.yml).
+#
+# migrations-configmap.yaml is GENERATED from infra/database by
+# infra/k8s/scripts/render-migrations.sh; never edit it by hand.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - secret.yaml
+  - pvc.yaml
+  - deployment.yaml
+  - service.yaml
+  - migrations-configmap.yaml
+  - job-migrate.yaml

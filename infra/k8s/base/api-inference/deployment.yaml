@@ -1,0 +1,189 @@
+# Mirror of the `api-inference` service in docker-compose.yml. The image is
+# referenced by name only: its tag is set once in the root kustomization
+# (`images:`), so a release bumps a single newTag.
+#
+# The API tolerates a missing model (it starts `unavailable`, answers 200 on
+# /health and 503 on /predict, and keeps polling the registry), so the pod only
+# waits for the training database and its migrations, never for MLflow.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-inference
+  labels:
+    app.kubernetes.io/name: api-inference
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: api-inference
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: api-inference
+    spec:
+      # Replacement for compose `depends_on` on postgres-train (healthy) and
+      # train-db-migrate (completed). Both loops are bounded; on exhaustion the
+      # init container fails and Kubernetes restarts it with backoff, which
+      # keeps the pod visibly in Init:Error instead of looping silently.
+      initContainers:
+        - name: wait-for-postgres-train
+          image: postgres:16
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              attempt=0
+              until pg_isready -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDATABASE"; do
+                attempt=$((attempt + 1))
+                if [ "$attempt" -ge 60 ]; then
+                  echo "postgres-train not ready after $attempt attempts, giving up" >&2
+                  exit 1
+                fi
+                echo "waiting for postgres-train ($attempt/60)..."
+                sleep 2
+              done
+          env:
+            - name: PGHOST
+              value: postgres-train
+            - name: PGPORT
+              value: "5432"
+            - name: PGDATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-train-credentials
+                  key: POSTGRES_DB
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-train-credentials
+                  key: POSTGRES_USER
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-train-credentials
+                  key: POSTGRES_PASSWORD
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 999
+            runAsGroup: 999
+        # The migration Job creates public.schema_migrations and inserts one
+        # row per applied file; a row count >= 1 means the schemas exist.
+        # psql errors (table missing, connection refused) stay on stderr so
+        # the reason for waiting is visible in the init container logs.
+        - name: wait-for-migrations
+          image: postgres:16
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              attempt=0
+              until applied="$(psql -tA -v ON_ERROR_STOP=1 -c 'SELECT count(*) FROM public.schema_migrations')" \
+                && [ "${applied:-0}" -ge 1 ]; do
+                attempt=$((attempt + 1))
+                if [ "$attempt" -ge 90 ]; then
+                  echo "migrations not applied after $attempt attempts (job/train-db-migrate), giving up" >&2
+                  exit 1
+                fi
+                echo "waiting for job/train-db-migrate ($attempt/90)..."
+                sleep 2
+              done
+              echo "migrations applied: $applied"
+          env:
+            - name: PGHOST
+              value: postgres-train
+            - name: PGPORT
+              value: "5432"
+            - name: PGDATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-train-credentials
+                  key: POSTGRES_DB
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-train-credentials
+                  key: POSTGRES_USER
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-train-credentials
+                  key: POSTGRES_PASSWORD
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 999
+            runAsGroup: 999
+      containers:
+        - name: api
+          image: aristotekean/diabetes-api-inference
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            # MLFLOW_TRACKING_URI / MLFLOW_S3_ENDPOINT_URL.
+            - configMapRef:
+                name: mlflow-client-env
+            # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY for artifact download.
+            - secretRef:
+                name: minio-credentials
+          env:
+            - name: MODEL_NAME
+              value: diabetes
+            # Registry alias resolved at startup: models:/<MODEL_NAME>@<MODEL_ALIAS>
+            - name: MODEL_ALIAS
+              value: production
+            # Background poll of the alias; a new production version is picked
+            # up without a restart (0 disables it).
+            - name: MODEL_REFRESH_SECONDS
+              value: "60"
+            # inference.logs lives in the training database (S5).
+            - name: TRAIN_DB_HOST
+              value: postgres-train
+            - name: TRAIN_DB_PORT
+              value: "5432"
+            - name: TRAIN_DB_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-train-credentials
+                  key: POSTGRES_DB
+            - name: TRAIN_DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-train-credentials
+                  key: POSTGRES_USER
+            - name: TRAIN_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-train-credentials
+                  key: POSTGRES_PASSWORD
+          ports:
+            - name: http
+              containerPort: 8000
+          # Same ceiling as compose (API_CPUS=1, API_MEMORY=1g); the requests
+          # leave room for MLflow/Postgres on a single small node.
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          # /health answers 200 even while the model is unavailable, so these
+          # probes only track the process, not the model state (/model-info
+          # does). Up to 150 s for the model-load retries at boot.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 5
