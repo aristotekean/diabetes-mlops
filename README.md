@@ -191,8 +191,10 @@ descarga el publicado en Docker Hub, aunque su contenido sea distinto.
    ```
 
 2. Apunta los manifiestos al tag nuevo: los tres `newTag` del bloque `images:`
-   en `infra/k8s/kustomization.yaml`. Mantén el mismo valor en `.env.example` y
-   en el valor por defecto de `docker-compose.yml`.
+   en `infra/k8s/kustomization.yaml`. Mantén el mismo valor en los demás sitios
+   que fijan el tag por defecto: `IMAGE_TAG` en `.env.example`, los
+   `${IMAGE_TAG:-…}` de `docker-compose.yml` y `apps/airflow/compose.yml`, y el
+   valor por defecto de `IMAGE_TAG` en `scripts/publish_images.sh`.
 
 3. Aplica y espera a que los Deployments terminen de rotar:
 
