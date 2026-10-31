@@ -1,0 +1,11 @@
+# Airflow metadata database (PostgreSQL), internal to the stack and separate
+# from the training database. Reached as `airflow-db` (same hostname as in
+# apps/airflow/compose.yml) and only used by base/airflow.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - secret.yaml
+  - pvc.yaml
+  - deployment.yaml
+  - service.yaml

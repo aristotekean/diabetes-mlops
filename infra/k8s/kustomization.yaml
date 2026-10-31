@@ -32,9 +32,11 @@ resources:
   - base/postgres-train
   - base/api-inference
   - base/frontend
+  - base/postgres-airflow
+  - base/airflow
 
 # Published multi-arch (amd64 + arm64) images built from this repository.
-# The service manifests (base/api-inference, base/frontend, later base/airflow)
+# The service manifests (base/api-inference, base/frontend, base/airflow)
 # reference them by name without a tag; kustomize rewrites each matching image
 # to name:newTag here, so this block is the single place to bump a release.
 images:
