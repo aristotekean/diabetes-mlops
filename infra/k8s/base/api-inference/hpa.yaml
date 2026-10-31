@@ -1,0 +1,47 @@
+# Horizontal autoscaling for the inference API, the only stateless service of
+# the stack worth scaling out. It is what the Locust load tests (Server B,
+# infra/load-testing) exercise: the step at which the HPA adds pods, and the
+# step at which maxReplicas is not enough, bound the capacity of the cluster.
+#
+# Requires metrics-server (see README, "Requisitos"); without it the HPA shows
+# TARGETS <unknown> and never scales.
+#
+# The target is CPU utilization relative to the container `requests` (250m in
+# deployment.yaml), so 70% means a new pod once the pods average ~175m. The
+# Deployment declares no `replicas`: the HPA owns the count, and a
+# `kubectl apply -k` never resets it.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: api-inference
+  labels:
+    app.kubernetes.io/name: api-inference
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: api-inference
+  minReplicas: 1
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+  behavior:
+    # React quickly while the load ramps up; cool down slowly so a short dip
+    # between Locust steps does not remove pods that the next step needs.
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 30
+    scaleDown:
+      stabilizationWindowSeconds: 120
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60

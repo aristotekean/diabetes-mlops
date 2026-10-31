@@ -12,7 +12,9 @@ metadata:
   labels:
     app.kubernetes.io/name: api-inference
 spec:
-  replicas: 1
+  # No `replicas`: the HorizontalPodAutoscaler in hpa.yaml owns the count
+  # (1 to 20 pods by CPU). Declaring it here would reset the count to 1 on every
+  # `kubectl apply -k`.
   selector:
     matchLabels:
       app.kubernetes.io/name: api-inference

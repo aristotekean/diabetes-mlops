@@ -77,6 +77,7 @@ local.
 |-----------|---------|
 | OrbStack con Kubernetes habilitado | Settings → Kubernetes. Trae `kubectl` y la StorageClass `local-path`. |
 | Ingress controller | OrbStack no incluye ninguno. Instala ingress-nginx desde el manifiesto oficial (abajo). |
+| metrics-server | OrbStack tampoco lo incluye. Lo necesita el HPA de `api-inference` para leer la CPU de los pods (abajo). |
 | Salida a Internet desde el clúster | Docker Hub para las imágenes y Google Drive para el dataset. |
 
 Instalación del Ingress controller (una sola vez por clúster, versión fijada):
@@ -88,6 +89,16 @@ kubectl -n ingress-nginx rollout status deploy/ingress-nginx-controller --timeou
 
 El Service `ingress-nginx-controller` es de tipo `LoadBalancer`; OrbStack le
 asigna una IP y resuelve cualquier `*.k8s.orb.local` hacia ella desde el Mac.
+
+Instalación de metrics-server (una sola vez por clúster, versión fijada). En
+OrbStack funciona tal cual, sin `--kubelet-insecure-tls`; en kind o minikube
+puede hacer falta añadir ese argumento al Deployment si el pod no pasa a Ready:
+
+```bash
+kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.9.1/components.yaml
+kubectl -n kube-system rollout status deploy/metrics-server --timeout=120s
+kubectl -n diabetes top pods            # tarda ~1 minuto en mostrar datos
+```
 
 ### Despliegue
 
@@ -104,6 +115,7 @@ Todo queda en el namespace `diabetes`:
 | `mlflow-db`, `minio`, `mlflow` | S1 PostgreSQL de MLflow, S3 MinIO (bucket `mlflow`), S2 MLflow tracking server |
 | `postgres-train` | S5 PostgreSQL con los esquemas `raw`, `clean` e `inference` |
 | `api-inference`, `frontend` | S4 FastAPI y S7 Streamlit |
+| HPA `api-inference` | Escala la API de 1 a 20 pods cuando la CPU media supera el 70 % de su `requests` (250m). El resto de servicios queda en una réplica: montan PVC o no son el objetivo de las pruebas de carga. |
 | `airflow-db`, `airflow` | PostgreSQL de metadatos y S6 Airflow en un solo pod (api-server, scheduler, dag-processor, triggerer) |
 | Jobs `minio-init`, `train-db-migrate`, `airflow-init` | Crean el bucket, aplican las migraciones SQL y migran la base de Airflow (equivalen a los one-shot de compose) |
 | Ingress `diabetes` | Enrutamiento por host hacia los cuatro servicios HTTP |
@@ -167,6 +179,7 @@ kubectl -n diabetes exec deploy/airflow -c scheduler -- airflow dags pause diabe
 | Comprobar los manifiestos antes de commitear | `bash infra/k8s/scripts/check.sh`: construye el kustomize y verifica que el ConfigMap de migraciones esté al día (no hay CI en el repo; sirve como pre-commit). |
 | Redesplegar una versión nueva | Publica las imágenes con un tag nuevo, cambia `newTag` en `infra/k8s/kustomization.yaml` y vuelve a aplicar (pasos abajo). |
 | Reaplicar un Job | Los Jobs terminados se borran solos a los 10 minutos (`ttlSecondsAfterFinished`), así que un `kubectl apply -k infra/k8s` posterior los vuelve a crear y ejecutar (son idempotentes). Solo hace falta `kubectl -n diabetes delete job <nombre>` si quieres repetirlo dentro de esos 10 minutos, p. ej. para aplicar migraciones nuevas en el momento. |
+| Observar el autoescalado en una prueba de carga | `kubectl -n diabetes get hpa api-inference -w` muestra TARGETS (CPU actual/objetivo) y REPLICAS en vivo; `kubectl -n diabetes top pods` el consumo por pod. Un TARGETS `<unknown>` significa que metrics-server no está instalado o aún no reporta. Apunta Locust (`infra/load-testing`) a `http://api.k8s.orb.local`. El HPA añade hasta 2 pods cada 30 s al subir y quita 1 por minuto al bajar, tras 2 minutos de calma. Con 20 pods la API reserva 5 CPU y 10 Gi de memoria; si aparecen pods `Pending`, el nodo no tiene memoria libre para reservar (OrbStack: Settings → System). |
 | Borrar todo | `kubectl delete -k infra/k8s` (los PVC y sus datos se eliminan con el namespace). |
 
 > **Credenciales de desarrollo.** Los Secrets llevan los mismos valores por
