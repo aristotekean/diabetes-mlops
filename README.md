@@ -144,7 +144,7 @@ API recarga el modelo sola cada 60 s (`MODEL_REFRESH_SECONDS`); para forzarlo,
 `curl -X POST http://api.k8s.orb.local/model/reload`. Comprueba:
 
 ```bash
-curl http://api.k8s.orb.local/model-info            # "status": "available"
+curl http://api.k8s.orb.local/model-info            # "status": "ready"
 curl -X POST http://api.k8s.orb.local/predict \
   -H 'content-type: application/json' -d @payload.json   # ejemplo en apps/api-inference/README.md
 ```
@@ -163,8 +163,9 @@ kubectl -n diabetes exec deploy/airflow -c scheduler -- airflow dags pause diabe
 | Tarea | Cómo |
 |-------|------|
 | Cambiar una migración SQL | Edita `infra/database/migrations`, ejecuta `bash infra/k8s/scripts/render-migrations.sh` y commitea el ConfigMap generado. `--check` falla si está desactualizado (pensado para CI). |
+| Comprobar los manifiestos antes de commitear | `bash infra/k8s/scripts/check.sh`: construye el kustomize y verifica que el ConfigMap de migraciones esté al día (no hay CI en el repo; sirve como pre-commit). |
 | Publicar una versión nueva | Cambia `newTag` en el bloque `images:` de `infra/k8s/kustomization.yaml` y vuelve a aplicar. |
-| Reaplicar tras cambiar la imagen de un Job | Los Jobs son inmutables: `kubectl -n diabetes delete job minio-init train-db-migrate airflow-init` y después `kubectl apply -k infra/k8s`. |
+| Reaplicar un Job | Los Jobs terminados se borran solos a los 10 minutos (`ttlSecondsAfterFinished`), así que un `kubectl apply -k infra/k8s` posterior los vuelve a crear y ejecutar (son idempotentes). Solo hace falta `kubectl -n diabetes delete job <nombre>` si quieres repetirlo dentro de esos 10 minutos, p. ej. para aplicar migraciones nuevas en el momento. |
 | Borrar todo | `kubectl delete -k infra/k8s` (los PVC y sus datos se eliminan con el namespace). |
 
 > **Credenciales de desarrollo.** Los Secrets llevan los mismos valores por

@@ -20,15 +20,25 @@ spec:
         app.kubernetes.io/name: mlflow
     spec:
       # Replacement for compose `depends_on` conditions: block until the
-      # backend store accepts connections and the artifact bucket exists.
+      # backend store accepts connections and the artifact bucket exists. Both
+      # waits are bounded; on exhaustion the init container fails and
+      # Kubernetes restarts it with backoff, which keeps the pod visibly in
+      # Init:Error instead of looping silently.
       initContainers:
         - name: wait-for-mlflow-db
           image: postgres:16
           command: ["/bin/sh", "-c"]
           args:
             - |
+              set -eu
+              attempt=0
               until pg_isready -h mlflow-db -p 5432 -U "$MLFLOW_DB_USER" -d "$MLFLOW_DB_NAME"; do
-                echo "waiting for mlflow-db..."
+                attempt=$((attempt + 1))
+                if [ "$attempt" -ge 60 ]; then
+                  echo "mlflow-db not ready after $attempt attempts, giving up" >&2
+                  exit 1
+                fi
+                echo "waiting for mlflow-db ($attempt/60)..."
                 sleep 2
               done
           env:
@@ -47,9 +57,19 @@ spec:
           command: ["/bin/sh", "-c"]
           args:
             - |
-              until mc alias set local http://minio:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null 2>&1 \
-                && mc ls local/mlflow >/dev/null 2>&1; do
-                echo "waiting for minio bucket mlflow (created by job/minio-init)..."
+              set -eu
+              # 100 x 3 s = 5 minutes: covers MinIO's own start plus the
+              # minio-init Job. mc's errors stay on stderr so the reason for
+              # waiting (server down vs. bucket missing) is visible in the logs.
+              attempt=0
+              until mc alias set local http://minio:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null \
+                && mc ls local/mlflow >/dev/null; do
+                attempt=$((attempt + 1))
+                if [ "$attempt" -ge 100 ]; then
+                  echo "bucket mlflow not available after $attempt attempts (job/minio-init), giving up" >&2
+                  exit 1
+                fi
+                echo "waiting for minio bucket mlflow, created by job/minio-init ($attempt/100)..."
                 sleep 3
               done
           envFrom:
@@ -64,26 +84,39 @@ spec:
           command: ["/bin/sh", "-c"]
           args:
             - |
+              # -e: a failed pip install fails the container (restart with
+              # backoff) instead of exec'ing a server missing its drivers.
+              set -eu
               pip install --no-cache-dir --quiet \
                 psycopg2-binary==2.9.10 \
                 boto3==1.40.49
               # DNS-rebinding guard (--allowed-hosts): requests whose Host
               # header is not listed get 403 (only /health is exempt). Allowed:
-              # the in-cluster Service names (clients, probes), the OrbStack
-              # domain and anything appended through MLFLOW_ALLOWED_HOSTS
-              # (comma-separated, e.g. 192.168.1.50:* on a Linux server or VM).
+              # the in-cluster Service names (clients, probes), built from the
+              # pod's own namespace so the manifests do not hardcode it, the
+              # OrbStack domain and anything appended through
+              # MLFLOW_ALLOWED_HOSTS (comma-separated, e.g. 192.168.1.50:* on a
+              # Linux server or VM).
               exec mlflow server \
                 --host 0.0.0.0 \
                 --port 5000 \
                 --backend-store-uri "postgresql+psycopg2://${MLFLOW_DB_USER}:${MLFLOW_DB_PASSWORD}@mlflow-db:5432/${MLFLOW_DB_NAME}" \
                 --artifacts-destination s3://mlflow \
                 --serve-artifacts \
-                --allowed-hosts "localhost:*,127.0.0.1:*,mlflow:*,mlflow.diabetes:*,mlflow.diabetes.svc:*,mlflow.diabetes.svc.cluster.local:*,*.orb.local${MLFLOW_ALLOWED_HOSTS:+,${MLFLOW_ALLOWED_HOSTS}}"
+                --allowed-hosts "localhost:*,127.0.0.1:*,mlflow:*,mlflow.${POD_NAMESPACE}:*,mlflow.${POD_NAMESPACE}.svc:*,mlflow.${POD_NAMESPACE}.svc.cluster.local:*,*.orb.local${MLFLOW_ALLOWED_HOSTS:+,${MLFLOW_ALLOWED_HOSTS}}"
           env:
+            # Namespace the pod runs in (downward API), for the Service FQDNs
+            # in --allowed-hosts above.
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
             # Optional extra allowed hosts; empty by default. The shell adds the
-            # leading comma only when the value is non-empty.
+            # leading comma only when the value is non-empty. Declared without
+            # `value`: the container still gets an empty variable, and the API
+            # server drops an explicit `value: ""`, which otherwise made every
+            # `kubectl apply` report this Deployment as "configured".
             - name: MLFLOW_ALLOWED_HOSTS
-              value: ""
             - name: MLFLOW_DB_USER
               valueFrom:
                 secretKeyRef:

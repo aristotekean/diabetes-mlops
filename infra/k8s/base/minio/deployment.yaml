@@ -39,10 +39,12 @@ spec:
             - name: data
               mountPath: /data
           # compose uses `mc ready local`; here the unauthenticated health
-          # endpoint is used so the kubelet probes over HTTP (no exec needed).
+          # endpoints are used so the kubelet probes over HTTP (no exec
+          # needed). /ready answers 200 only once the server can serve
+          # requests, /live only says the process is up.
           readinessProbe:
             httpGet:
-              path: /minio/health/live
+              path: /minio/health/ready
               port: s3
             initialDelaySeconds: 5
             periodSeconds: 10
