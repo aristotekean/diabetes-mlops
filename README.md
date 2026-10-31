@@ -67,7 +67,8 @@ Luego `docker compose up -d` descarga las imágenes publicadas
 
 `infra/k8s` despliega Server A completo (S1–S7 e Ingress) con kustomize sobre
 el Kubernetes integrado de OrbStack. Usa las mismas imágenes publicadas en
-Docker Hub (`aristotekean/diabetes-*:0.1.0`): no hace falta construir nada en
+Docker Hub (`aristotekean/diabetes-*:0.1.1`, el tag fijado en el bloque
+`images:` de `infra/k8s/kustomization.yaml`): no hace falta construir nada en
 local.
 
 ### Requisitos
@@ -164,7 +165,7 @@ kubectl -n diabetes exec deploy/airflow -c scheduler -- airflow dags pause diabe
 |-------|------|
 | Cambiar una migración SQL | Edita `infra/database/migrations`, ejecuta `bash infra/k8s/scripts/render-migrations.sh` y commitea el ConfigMap generado. `--check` falla si está desactualizado (pensado para CI). |
 | Comprobar los manifiestos antes de commitear | `bash infra/k8s/scripts/check.sh`: construye el kustomize y verifica que el ConfigMap de migraciones esté al día (no hay CI en el repo; sirve como pre-commit). |
-| Publicar una versión nueva | Cambia `newTag` en el bloque `images:` de `infra/k8s/kustomization.yaml` y vuelve a aplicar. |
+| Redesplegar una versión nueva | Publica las imágenes con un tag nuevo, cambia `newTag` en `infra/k8s/kustomization.yaml` y vuelve a aplicar (pasos abajo). |
 | Reaplicar un Job | Los Jobs terminados se borran solos a los 10 minutos (`ttlSecondsAfterFinished`), así que un `kubectl apply -k infra/k8s` posterior los vuelve a crear y ejecutar (son idempotentes). Solo hace falta `kubectl -n diabetes delete job <nombre>` si quieres repetirlo dentro de esos 10 minutos, p. ej. para aplicar migraciones nuevas en el momento. |
 | Borrar todo | `kubectl delete -k infra/k8s` (los PVC y sus datos se eliminan con el namespace). |
 
@@ -172,6 +173,45 @@ kubectl -n diabetes exec deploy/airflow -c scheduler -- airflow dags pause diabe
 > defecto que compose (`minioadmin`, `airflow`, contraseñas `app`/`mlflow`).
 > Son para un clúster local; cámbialos antes de exponer el clúster a otras
 > máquinas.
+
+#### Redespliegue de una versión nueva
+
+Cada cambio de código se publica con un **tag nuevo**; nunca se reutiliza uno
+existente. Los manifiestos usan `imagePullPolicy: IfNotPresent`, y OrbStack
+comparte el almacén de imágenes con el Docker local: si un tag ya existe en la
+máquina (por ejemplo, un build local anterior), Kubernetes lo usa tal cual y no
+descarga el publicado en Docker Hub, aunque su contenido sea distinto.
+
+1. Publica las tres imágenes para amd64 y arm64 (requiere `docker login` y el
+   árbol de trabajo sin cambios pendientes):
+
+   ```bash
+   IMAGE_TAG=0.1.2 scripts/publish_images.sh                       # las tres
+   IMAGE_TAG=0.1.2 scripts/publish_images.sh frontend              # solo una
+   ```
+
+2. Apunta los manifiestos al tag nuevo: los tres `newTag` del bloque `images:`
+   en `infra/k8s/kustomization.yaml`. Mantén el mismo valor en `.env.example` y
+   en el valor por defecto de `docker-compose.yml`.
+
+3. Aplica y espera a que los Deployments terminen de rotar:
+
+   ```bash
+   kubectl apply -k infra/k8s
+   kubectl -n diabetes rollout status deploy/frontend deploy/api-inference deploy/airflow --timeout=600s
+   ```
+
+   Los datos (modelo registrado, bases de datos, dataset) viven en los PVC y se
+   conservan. Si `apply` responde que `airflow-init` es inmutable, el Job aún no
+   venció su TTL: `kubectl -n diabetes delete job airflow-init` y vuelve a
+   aplicar.
+
+Para comprobar qué imagen corre cada pod y si coincide con Docker Hub:
+
+```bash
+kubectl -n diabetes get pods -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.containers[0].image}{"\n"}{end}'
+docker buildx imagetools inspect aristotekean/diabetes-frontend:0.1.2   # digest publicado
+```
 
 ### En un servidor Linux
 
