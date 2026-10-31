@@ -1,0 +1,10 @@
+# Namespace plus the configuration shared by every MLflow client in the stack
+# (mlflow server, api-inference, airflow). Service manifests reference these
+# by name with `envFrom`, so keep the object names stable.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - mlflow-client-env.yaml
+  - minio-credentials.yaml

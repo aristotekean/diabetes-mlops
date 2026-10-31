@@ -1,0 +1,11 @@
+# No storageClassName: the cluster default is used (OrbStack: `local-path`).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: minio-data
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi

@@ -1,0 +1,9 @@
+# S2 · MLflow tracking server + model registry.
+# Backend store: mlflow-db. Artifacts: MinIO bucket `mlflow`, proxied through
+# the server so clients never need bucket credentials.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - deployment.yaml
+  - service.yaml
