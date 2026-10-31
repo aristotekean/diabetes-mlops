@@ -221,8 +221,10 @@ docker buildx imagetools inspect aristotekean/diabetes-frontend:0.1.2   # digest
   `infra/k8s/base/ingress/ingress.yaml` sustitúyelos por el nombre Tailscale
   (o la IP) del nodo, uno por servicio o con prefijos de ruta.
 - Añade ese host a `MLFLOW_ALLOWED_HOSTS` en
-  `infra/k8s/base/mlflow/deployment.yaml` (p. ej. `mlflow.<nodo>.ts.net:*`);
-  sin eso MLflow responde 403 desde otra máquina.
+  `infra/k8s/base/mlflow/deployment.yaml` (p. ej. `mlflow.<nodo>.ts.net:*`) y
+  el origen completo a `MLFLOW_CORS_ALLOWED_ORIGINS` (p. ej.
+  `http://mlflow.<nodo>.ts.net`); sin lo primero MLflow responde 403 desde otra
+  máquina y sin lo segundo la UI carga pero no lista runs.
 - La opción "Expose services to local network devices" es exclusiva de OrbStack:
   sin ella los LoadBalancer y NodePort solo se alcanzan desde el propio Mac. En
   un servidor, expón el controller con el LoadBalancer de tu clúster o un

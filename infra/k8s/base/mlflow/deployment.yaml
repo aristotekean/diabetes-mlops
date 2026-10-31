@@ -97,13 +97,21 @@ spec:
               # OrbStack domain and anything appended through
               # MLFLOW_ALLOWED_HOSTS (comma-separated, e.g. 192.168.1.50:* on a
               # Linux server or VM).
+              # CSRF guard (--cors-allowed-origins): POSTs whose Origin header
+              # is neither localhost nor listed get 403. Browsers send Origin
+              # on same-origin POSTs too, so the UI served through the ingress
+              # blocks its own runs/search without this. Allowed: the OrbStack
+              # domain and anything appended through
+              # MLFLOW_CORS_ALLOWED_ORIGINS (comma-separated, full origins with
+              # scheme, e.g. http://192.168.1.50:5000).
               exec mlflow server \
                 --host 0.0.0.0 \
                 --port 5000 \
                 --backend-store-uri "postgresql+psycopg2://${MLFLOW_DB_USER}:${MLFLOW_DB_PASSWORD}@mlflow-db:5432/${MLFLOW_DB_NAME}" \
                 --artifacts-destination s3://mlflow \
                 --serve-artifacts \
-                --allowed-hosts "localhost:*,127.0.0.1:*,mlflow:*,mlflow.${POD_NAMESPACE}:*,mlflow.${POD_NAMESPACE}.svc:*,mlflow.${POD_NAMESPACE}.svc.cluster.local:*,*.orb.local${MLFLOW_ALLOWED_HOSTS:+,${MLFLOW_ALLOWED_HOSTS}}"
+                --allowed-hosts "localhost:*,127.0.0.1:*,mlflow:*,mlflow.${POD_NAMESPACE}:*,mlflow.${POD_NAMESPACE}.svc:*,mlflow.${POD_NAMESPACE}.svc.cluster.local:*,*.orb.local${MLFLOW_ALLOWED_HOSTS:+,${MLFLOW_ALLOWED_HOSTS}}" \
+                --cors-allowed-origins "http://*.orb.local${MLFLOW_CORS_ALLOWED_ORIGINS:+,${MLFLOW_CORS_ALLOWED_ORIGINS}}"
           env:
             # Namespace the pod runs in (downward API), for the Service FQDNs
             # in --allowed-hosts above.
@@ -117,6 +125,9 @@ spec:
             # server drops an explicit `value: ""`, which otherwise made every
             # `kubectl apply` report this Deployment as "configured".
             - name: MLFLOW_ALLOWED_HOSTS
+            # Optional extra CORS origins for the UI; same empty-by-default
+            # handling as MLFLOW_ALLOWED_HOSTS.
+            - name: MLFLOW_CORS_ALLOWED_ORIGINS
             - name: MLFLOW_DB_USER
               valueFrom:
                 secretKeyRef:

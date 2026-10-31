@@ -8,8 +8,9 @@
 # on the Mac to the cluster's LoadBalancer, so no /etc/hosts entries are
 # needed. On a Linux server replace them with the Tailscale name (or IP) of
 # the node, e.g. `mlflow.<node>.<tailnet>.ts.net`, and extend the MLflow
-# allow-list through MLFLOW_ALLOWED_HOSTS in base/mlflow/deployment.yaml;
-# `--allowed-hosts` already covers `*.orb.local`, nothing else.
+# allow-lists through MLFLOW_ALLOWED_HOSTS and MLFLOW_CORS_ALLOWED_ORIGINS in
+# base/mlflow/deployment.yaml; `--allowed-hosts` and `--cors-allowed-origins`
+# already cover `*.orb.local`, nothing else.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
