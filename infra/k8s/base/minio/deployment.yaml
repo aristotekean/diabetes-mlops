@@ -30,6 +30,11 @@ spec:
           envFrom:
             - secretRef:
                 name: minio-credentials
+          env:
+            # Same as docker-compose.yml: Prometheus (Server C) scrapes
+            # /minio/v2/metrics/cluster without a bearer token.
+            - name: MINIO_PROMETHEUS_AUTH_TYPE
+              value: public
           ports:
             - name: s3
               containerPort: 9000

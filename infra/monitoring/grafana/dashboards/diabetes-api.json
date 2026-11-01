@@ -329,6 +329,200 @@
           "renameByName": { "name": "Modelo", "version": "Versión", "alias": "Alias" }
         } }
       ]
+    },
+
+    { "id": 103, "type": "row", "title": "MinIO · almacén de artefactos (S3)", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 47 }, "collapsed": false, "panels": [] },
+
+    {
+      "id": 19,
+      "type": "stat",
+      "title": "Estado de MinIO",
+      "description": "minio_cluster_health_status — 1 = el servidor atiende lecturas y escrituras.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 48 },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "min(minio_cluster_health_status)" }
+      ],
+      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "center", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "value" },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "SIN DATOS",
+          "mappings": [
+            { "type": "value", "options": { "1": { "text": "OK", "color": "green", "index": 0 }, "0": { "text": "DEGRADADO", "color": "red", "index": 1 } } }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] },
+          "color": { "mode": "thresholds" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 20,
+      "type": "stat",
+      "title": "Buckets",
+      "description": "minio_cluster_bucket_total — buckets existentes (el scanner de MinIO lo actualiza cada pocos minutos).",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 48 },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(minio_cluster_bucket_total) or vector(0)" }
+      ],
+      "options": { "colorMode": "value", "graphMode": "none", "justifyMode": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 0, "color": { "mode": "fixed", "fixedColor": "blue" } }, "overrides": [] }
+    },
+    {
+      "id": 21,
+      "type": "stat",
+      "title": "Objetos almacenados",
+      "description": "minio_cluster_usage_object_total — objetos en todos los buckets (artefactos de MLflow).",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 48 },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(minio_cluster_usage_object_total) or vector(0)" }
+      ],
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 0, "color": { "mode": "fixed", "fixedColor": "blue" } }, "overrides": [] }
+    },
+    {
+      "id": 22,
+      "type": "stat",
+      "title": "Datos almacenados",
+      "description": "minio_cluster_usage_total_bytes — bytes ocupados por los objetos.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 48 },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(minio_cluster_usage_total_bytes) or vector(0)" }
+      ],
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "fieldConfig": { "defaults": { "unit": "bytes", "decimals": 1, "color": { "mode": "fixed", "fixedColor": "purple" } }, "overrides": [] }
+    },
+    {
+      "id": 23,
+      "type": "stat",
+      "title": "Capacidad usada",
+      "description": "1 − usable_free / usable_total — porcentaje del disco de MinIO en uso.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 48 },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "(1 - sum(minio_cluster_capacity_usable_free_bytes) / sum(minio_cluster_capacity_usable_total_bytes)) * 100" }
+      ],
+      "options": { "colorMode": "value", "graphMode": "none", "justifyMode": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent", "decimals": 1, "min": 0, "max": 100,
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "orange", "value": 70 }, { "color": "red", "value": 90 } ] },
+          "color": { "mode": "thresholds" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 24,
+      "type": "stat",
+      "title": "Errores S3 (total)",
+      "description": "minio_s3_requests_errors_total — solicitudes S3 respondidas con error (4xx + 5xx).",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 48 },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(minio_s3_requests_errors_total) or vector(0)" }
+      ],
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 0, "color": { "mode": "fixed", "fixedColor": "red" } }, "overrides": [] }
+    },
+
+    {
+      "id": 25,
+      "type": "timeseries",
+      "title": "Solicitudes S3 por operación",
+      "description": "rate(minio_s3_requests_total[1m]) por API S3 (getobject, putobject, listobjectsv2, …).",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 52 },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "legendFormat": "{{api}}",
+          "expr": "sum by (api) (rate(minio_s3_requests_total[1m]))" }
+      ],
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "fieldConfig": { "defaults": { "unit": "reqps", "min": 0, "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10, "showPoints": "never", "stacking": { "mode": "normal" } }, "color": { "mode": "palette-classic" } }, "overrides": [] }
+    },
+    {
+      "id": 26,
+      "type": "timeseries",
+      "title": "Errores S3 por operación",
+      "description": "rate(minio_s3_requests_errors_total[1m]) por API S3. Un headobject sobre un objeto inexistente ya cuenta como 4xx.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 52 },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "legendFormat": "{{api}}",
+          "expr": "sum by (api) (rate(minio_s3_requests_errors_total[1m]))" }
+      ],
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "fieldConfig": { "defaults": { "unit": "reqps", "min": 0, "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10, "showPoints": "never" }, "color": { "mode": "palette-classic" } }, "overrides": [] }
+    },
+
+    {
+      "id": 27,
+      "type": "timeseries",
+      "title": "Tráfico S3",
+      "description": "Bytes por segundo recibidos (subidas de artefactos) y enviados (descargas de modelos).",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 60 },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "legendFormat": "recibido",
+          "expr": "sum(rate(minio_s3_traffic_received_bytes[1m]))" },
+        { "refId": "B", "datasource": { "type": "prometheus", "uid": "prometheus" }, "legendFormat": "enviado",
+          "expr": "sum(rate(minio_s3_traffic_sent_bytes[1m]))" }
+      ],
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi", "sort": "none" } },
+      "fieldConfig": { "defaults": { "unit": "Bps", "min": 0, "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 15, "showPoints": "never" }, "color": { "mode": "palette-classic" } }, "overrides": [] }
+    },
+    {
+      "id": 28,
+      "type": "timeseries",
+      "title": "Latencia S3 · TTFB (p50 / p95 / p99)",
+      "description": "histogram_quantile sobre minio_s3_requests_ttfb_seconds_distribution (tiempo hasta el primer byte).",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 60 },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "legendFormat": "p50",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(minio_s3_requests_ttfb_seconds_distribution[5m])))" },
+        { "refId": "B", "datasource": { "type": "prometheus", "uid": "prometheus" }, "legendFormat": "p95",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(minio_s3_requests_ttfb_seconds_distribution[5m])))" },
+        { "refId": "C", "datasource": { "type": "prometheus", "uid": "prometheus" }, "legendFormat": "p99",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(minio_s3_requests_ttfb_seconds_distribution[5m])))" }
+      ],
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi", "sort": "none" } },
+      "fieldConfig": { "defaults": { "unit": "s", "min": 0, "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10, "showPoints": "never" }, "color": { "mode": "palette-classic" } }, "overrides": [] }
+    },
+    {
+      "id": 29,
+      "type": "timeseries",
+      "title": "CPU y memoria de MinIO",
+      "description": "rate(minio_node_process_cpu_total_seconds[1m]) en núcleos (eje izquierdo) y minio_node_process_resident_memory_bytes (eje derecho).",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 60 },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "legendFormat": "CPU (cores)",
+          "expr": "sum(rate(minio_node_process_cpu_total_seconds[1m]))" },
+        { "refId": "B", "datasource": { "type": "prometheus", "uid": "prometheus" }, "legendFormat": "Memoria (RSS)",
+          "expr": "sum(minio_node_process_resident_memory_bytes)" }
+      ],
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi", "sort": "none" } },
+      "fieldConfig": {
+        "defaults": { "unit": "none", "min": 0, "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 15, "showPoints": "never" }, "color": { "mode": "fixed", "fixedColor": "purple" } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "Memoria (RSS)" },
+            "properties": [
+              { "id": "unit", "value": "bytes" },
+              { "id": "custom.axisPlacement", "value": "right" },
+              { "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } }
+            ] }
+        ]
+      }
     }
   ]
 }

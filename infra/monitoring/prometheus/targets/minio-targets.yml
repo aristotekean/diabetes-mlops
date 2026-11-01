@@ -1,0 +1,18 @@
+# Scrape target for MinIO (file_sd for job `minio`, path /minio/v2/metrics/cluster).
+#
+# Kubernetes on OrbStack (default): Server A runs in the cluster and OrbStack
+# resolves cluster Services from Docker containers, so Prometheus reaches the
+# MinIO Service directly.
+#   - targets: ["minio.diabetes.svc.cluster.local:9000"]
+#
+# Local compose network (root docker-compose.yml): the Docker service name.
+#   - targets: ["minio:9000"]
+#
+# Dedicated Server C: the host:port where Server A's MinIO S3 port is reachable.
+#   - targets: ["10.0.0.5:9000"]
+#
+# Prometheus reloads this file automatically; no restart needed after editing.
+
+- targets: ["minio.diabetes.svc.cluster.local:9000"]
+  labels:
+    service: minio
