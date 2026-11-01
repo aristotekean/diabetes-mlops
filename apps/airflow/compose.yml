@@ -9,43 +9,45 @@
 #   - airflow-db      : Airflow metadata only (internal, not published to the host)
 #   - postgres-train  : training database read by the DAGs
 #
-# Standalone (Airflow only, from the repository root):
-#   docker compose -f apps/airflow/compose.yml up -d --build
+# Every value comes from .env at the repository root (see .env.example).
+# Standalone (Airflow only, from the repository root), passing it explicitly
+# because the project directory is then apps/airflow:
+#   docker compose --env-file .env -f apps/airflow/compose.yml up -d --build
 
 x-airflow-common: &airflow-common
-  image: ${DOCKERHUB_USER:-aristotekean}/diabetes-airflow:${IMAGE_TAG:-0.1.1}
+  image: ${DOCKERHUB_USER:?}/diabetes-airflow:${IMAGE_TAG:?}
   build:
     context: ../..
     dockerfile: apps/airflow/Dockerfile
   environment: &airflow-common-env
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
     AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
-    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-db:5432/airflow
-    AIRFLOW__CORE__FERNET_KEY: ""
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_DB_USER:?}:${AIRFLOW_DB_PASSWORD:?}@airflow-db:5432/${AIRFLOW_DB_NAME:?}
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY?}
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
     AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-apiserver:8080/execution/
-    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET:-change-me-jwt-secret}
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET:?}
     AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
     # S5 · training database the DAGs read from
-    TRAIN_DB_HOST: postgres-train
-    TRAIN_DB_PORT: "5432"
-    TRAIN_DB_NAME: diabetes
-    TRAIN_DB_USER: app
-    TRAIN_DB_PASSWORD: app
-    DIABETES_DATASET_PATH: /opt/airflow/data/Diabetes/Diabetes.csv
-    DIABETES_SOURCE_URI: https://docs.google.com/uc?export=download&confirm=t&id=1k5-1caezQ3zWJbKaiMULTGq-3sz6uThC
+    TRAIN_DB_HOST: ${TRAIN_DB_HOST:?}
+    TRAIN_DB_PORT: ${TRAIN_DB_PORT:?}
+    TRAIN_DB_NAME: ${TRAIN_DB_NAME:?}
+    TRAIN_DB_USER: ${TRAIN_DB_USER:?}
+    TRAIN_DB_PASSWORD: ${TRAIN_DB_PASSWORD:?}
+    DIABETES_DATASET_PATH: ${DIABETES_DATASET_PATH:?}
+    DIABETES_SOURCE_URI: ${DIABETES_SOURCE_URI:?}
     # S2 · MLflow tracking server (artifacts proxied by the server)
-    MLFLOW_TRACKING_URI: http://mlflow:5000
-    MLFLOW_EXPERIMENT_NAME: diabetes-readmission
-    MLFLOW_S3_ENDPOINT_URL: http://minio:9000
-    AWS_ACCESS_KEY_ID: minioadmin
-    AWS_SECRET_ACCESS_KEY: minioadmin
-    MODEL_NAME: diabetes
-    MODEL_ALIAS: production
+    MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI:?}
+    MLFLOW_EXPERIMENT_NAME: ${MLFLOW_EXPERIMENT_NAME:?}
+    MLFLOW_S3_ENDPOINT_URL: ${MLFLOW_S3_ENDPOINT_URL:?}
+    AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:?}
+    AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:?}
+    MODEL_NAME: ${MODEL_NAME:?}
+    MODEL_ALIAS: ${MODEL_ALIAS:?}
     # Each run loads the next RAW batch, so a short interval replays the
     # incremental arrival of the 7 batches in about an hour.
-    DIABETES_TRAINING_SCHEDULE: "*/10 * * * *"
+    DIABETES_TRAINING_SCHEDULE: ${DIABETES_TRAINING_SCHEDULE:?}
   volumes:
     - ./dags:/opt/airflow/dags
     - ./logs:/opt/airflow/logs
@@ -55,7 +57,7 @@ x-airflow-common: &airflow-common
   # On Linux bind mounts keep the host's ownership, so the Airflow user must be
   # the host user (AIRFLOW_UID=$(id -u) in .env) to write logs and download the
   # dataset. Docker Desktop/OrbStack on macOS map ownership, so 50000 works.
-  user: "${AIRFLOW_UID:-50000}:0"
+  user: "${AIRFLOW_UID:?}:0"
   depends_on: &airflow-common-depends-on
     airflow-db:
       condition: service_healthy
@@ -72,16 +74,16 @@ services:
     image: postgres:16
     container_name: diabetes-postgres-train
     environment:
-      POSTGRES_DB: diabetes
-      POSTGRES_USER: app
-      POSTGRES_PASSWORD: app
+      POSTGRES_DB: ${TRAIN_DB_NAME:?}
+      POSTGRES_USER: ${TRAIN_DB_USER:?}
+      POSTGRES_PASSWORD: ${TRAIN_DB_PASSWORD:?}
     ports:
       # Change POSTGRES_TRAIN_PORT if the host already runs PostgreSQL.
-      - "${POSTGRES_TRAIN_PORT:-5432}:5432"
+      - "${POSTGRES_TRAIN_PORT:?}:5432"
     volumes:
       - postgres-train-data:/var/lib/postgresql/data
     healthcheck:
-      test: [ "CMD", "pg_isready", "-U", "app", "-d", "diabetes" ]
+      test: [ "CMD", "pg_isready", "-U", "${TRAIN_DB_USER:?}", "-d", "${TRAIN_DB_NAME:?}" ]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -95,11 +97,11 @@ services:
     container_name: diabetes-train-db-migrate
     entrypoint: [ "sh", "/database/migrate.sh" ]
     environment:
-      PGHOST: postgres-train
-      PGPORT: "5432"
-      PGDATABASE: diabetes
-      PGUSER: app
-      PGPASSWORD: app
+      PGHOST: ${TRAIN_DB_HOST:?}
+      PGPORT: ${TRAIN_DB_PORT:?}
+      PGDATABASE: ${TRAIN_DB_NAME:?}
+      PGUSER: ${TRAIN_DB_USER:?}
+      PGPASSWORD: ${TRAIN_DB_PASSWORD:?}
     volumes:
       - ../../infra/database:/database:ro
     depends_on:
@@ -113,13 +115,13 @@ services:
     image: postgres:16
     container_name: diabetes-airflow-db
     environment:
-      POSTGRES_DB: airflow
-      POSTGRES_USER: airflow
-      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: ${AIRFLOW_DB_NAME:?}
+      POSTGRES_USER: ${AIRFLOW_DB_USER:?}
+      POSTGRES_PASSWORD: ${AIRFLOW_DB_PASSWORD:?}
     volumes:
       - airflow-db-data:/var/lib/postgresql/data
     healthcheck:
-      test: [ "CMD", "pg_isready", "-U", "airflow", "-d", "airflow" ]
+      test: [ "CMD", "pg_isready", "-U", "${AIRFLOW_DB_USER:?}", "-d", "${AIRFLOW_DB_NAME:?}" ]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -137,14 +139,14 @@ services:
       - -c
       - |
         mkdir -p /opt/airflow/{logs,dags,plugins,config,data/Diabetes}
-        chown -R "${AIRFLOW_UID:-50000}:0" /opt/airflow/{logs,dags,plugins,config,data/Diabetes}
+        chown -R "${AIRFLOW_UID:?}:0" /opt/airflow/{logs,dags,plugins,config,data/Diabetes}
         exec /entrypoint airflow version
     environment:
       <<: *airflow-common-env
       _AIRFLOW_DB_MIGRATE: "true"
       _AIRFLOW_WWW_USER_CREATE: "true"
-      _AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_ADMIN_USER:-airflow}
-      _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:-airflow}
+      _AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_ADMIN_USER:?}
+      _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:?}
     user: "0:0"
 
   airflow-apiserver:
@@ -152,7 +154,7 @@ services:
     container_name: diabetes-airflow-apiserver
     command: api-server
     ports:
-      - "${AIRFLOW_PORT:-8080}:8080"
+      - "${AIRFLOW_PORT:?}:8080"
     healthcheck:
       test: [ "CMD", "curl", "--fail", "http://localhost:8080/api/v2/monitor/health" ]
       interval: 30s

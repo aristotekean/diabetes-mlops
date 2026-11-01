@@ -12,14 +12,13 @@
 #   docker compose up -d             # or pull them from DockerHub (multi-arch)
 # The project images are published for linux/amd64 and linux/arm64 by
 # scripts/publish_images.sh, so the same tags run on an Apple Silicon Mac and
-# on a Linux server or VM. On Linux set AIRFLOW_UID to your user id first (see
-# .env.example) so Airflow can write the bind-mounted folders.
+# on a Linux server or VM. On Linux set AIRFLOW_UID to your user id first so
+# Airflow can write the bind-mounted folders.
 #
-# Tunables (env or .env): DOCKERHUB_USER, IMAGE_TAG, API_PORT, API_CPUS,
-# API_MEMORY, FRONTEND_PORT, MLFLOW_PORT, MLFLOW_DB_PORT, MINIO_PORT,
-# MINIO_CONSOLE_PORT, MLFLOW_ALLOWED_HOSTS, AIRFLOW_UID, AIRFLOW_PORT,
-# POSTGRES_TRAIN_PORT, AIRFLOW_ADMIN_USER, AIRFLOW_ADMIN_PASSWORD,
-# AIRFLOW_JWT_SECRET.
+# Configuration: every value (credentials, ports, image tag, model, Locust and
+# monitoring settings) comes from .env at the repository root; there are no
+# defaults here. Create it with `cp .env.example .env`. A missing variable
+# stops compose with "required variable ... is missing a value".
 #
 # Locust (Server B) is behind the `loadtest` profile, so it never starts by
 # default and does not compete with the API for CPU:
@@ -43,13 +42,13 @@ include:
   - path: infra/monitoring/docker-compose.yml
 
 x-mlflow-client-env: &mlflow-client-env
-  MLFLOW_TRACKING_URI: http://mlflow:5000
+  MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI:?}
   # Artifacts are proxied by the server (--serve-artifacts), so clients only
   # need the tracking URI. The S3 variables are kept so direct access to the
   # bucket also works when needed.
-  MLFLOW_S3_ENDPOINT_URL: http://minio:9000
-  AWS_ACCESS_KEY_ID: minioadmin
-  AWS_SECRET_ACCESS_KEY: minioadmin
+  MLFLOW_S3_ENDPOINT_URL: ${MLFLOW_S3_ENDPOINT_URL:?}
+  AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:?}
+  AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:?}
 
 services:
   # ------------------------------------------------------------------------- #
@@ -59,15 +58,15 @@ services:
     image: postgres:16
     container_name: diabetes-mlflow-db
     environment:
-      POSTGRES_DB: mlflow
-      POSTGRES_USER: mlflow
-      POSTGRES_PASSWORD: mlflow
+      POSTGRES_DB: ${MLFLOW_DB_NAME:?}
+      POSTGRES_USER: ${MLFLOW_DB_USER:?}
+      POSTGRES_PASSWORD: ${MLFLOW_DB_PASSWORD:?}
     ports:
-      - "${MLFLOW_DB_PORT:-5431}:5432"
+      - "${MLFLOW_DB_PORT:?}:5432"
     volumes:
       - mlflow-db-data:/var/lib/postgresql/data
     healthcheck:
-      test: [ "CMD", "pg_isready", "-U", "mlflow", "-d", "mlflow" ]
+      test: [ "CMD", "pg_isready", "-U", "${MLFLOW_DB_USER:?}", "-d", "${MLFLOW_DB_NAME:?}" ]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -85,11 +84,11 @@ services:
     container_name: diabetes-minio
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?}
     ports:
-      - "${MINIO_PORT:-9000}:9000"
-      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+      - "${MINIO_PORT:?}:9000"
+      - "${MINIO_CONSOLE_PORT:?}:9001"
     volumes:
       - minio-data:/data
     healthcheck:
@@ -107,11 +106,17 @@ services:
     image: cgr.dev/chainguard/minio:latest
     container_name: diabetes-minio-init
     entrypoint: [ "/bin/sh", "-c" ]
+    # Credentials and bucket go through the environment and are expanded by
+    # the container shell ($$), so special characters in them are safe.
     command:
       - |
-        mc alias set local http://minio:9000 minioadmin minioadmin
-        mc mb --ignore-existing local/mlflow
-        echo "bucket ready: mlflow"
+        mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"
+        mc mb --ignore-existing "local/$$MLFLOW_ARTIFACTS_BUCKET"
+        echo "bucket ready: $$MLFLOW_ARTIFACTS_BUCKET"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?}
+      MLFLOW_ARTIFACTS_BUCKET: ${MLFLOW_ARTIFACTS_BUCKET:?}
     depends_on:
       minio:
         condition: service_healthy
@@ -142,20 +147,30 @@ services:
         # name (clients) and the OrbStack domain are allowed; on a Linux
         # server or VM add the IP/hostname used to open the UI through
         # MLFLOW_ALLOWED_HOSTS, e.g. 192.168.1.50:*.
+        # CSRF guard (--cors-allowed-origins): POSTs whose Origin is neither
+        # localhost nor listed get 403; add the UI origin from another machine
+        # through MLFLOW_CORS_ALLOWED_ORIGINS, e.g. http://192.168.1.50:5001.
+        # The database credentials and the bucket are expanded by the
+        # container shell ($$) from the environment below.
         exec mlflow server \
           --host 0.0.0.0 \
           --port 5000 \
-          --backend-store-uri postgresql+psycopg2://mlflow:mlflow@mlflow-db:5432/mlflow \
-          --artifacts-destination s3://mlflow \
+          --backend-store-uri "postgresql+psycopg2://$${MLFLOW_DB_USER}:$${MLFLOW_DB_PASSWORD}@mlflow-db:5432/$${MLFLOW_DB_NAME}" \
+          --artifacts-destination "s3://$${MLFLOW_ARTIFACTS_BUCKET}" \
           --serve-artifacts \
-          --allowed-hosts "localhost:*,127.0.0.1:*,mlflow:*,*.orb.local${MLFLOW_ALLOWED_HOSTS:+,${MLFLOW_ALLOWED_HOSTS}}"
+          --allowed-hosts "localhost:*,127.0.0.1:*,mlflow:*,*.orb.local${MLFLOW_ALLOWED_HOSTS:+,${MLFLOW_ALLOWED_HOSTS}}" \
+          --cors-allowed-origins "http://*.orb.local${MLFLOW_CORS_ALLOWED_ORIGINS:+,${MLFLOW_CORS_ALLOWED_ORIGINS}}"
     environment:
-      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
-      AWS_ACCESS_KEY_ID: minioadmin
-      AWS_SECRET_ACCESS_KEY: minioadmin
+      MLFLOW_DB_NAME: ${MLFLOW_DB_NAME:?}
+      MLFLOW_DB_USER: ${MLFLOW_DB_USER:?}
+      MLFLOW_DB_PASSWORD: ${MLFLOW_DB_PASSWORD:?}
+      MLFLOW_ARTIFACTS_BUCKET: ${MLFLOW_ARTIFACTS_BUCKET:?}
+      MLFLOW_S3_ENDPOINT_URL: ${MLFLOW_S3_ENDPOINT_URL:?}
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:?}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:?}
     ports:
       # Host port 5001: macOS AirPlay Receiver squats 5000 on the host.
-      - "${MLFLOW_PORT:-5001}:5000"
+      - "${MLFLOW_PORT:?}:5000"
     healthcheck:
       test: [ "CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:5000/health', timeout=4)" ]
       interval: 15s
@@ -178,27 +193,27 @@ services:
   # in the cluster the Ingress controller fronts it instead.
   # ------------------------------------------------------------------------- #
   api-inference:
-    image: ${DOCKERHUB_USER:-aristotekean}/diabetes-api-inference:${IMAGE_TAG:-0.1.1}
+    image: ${DOCKERHUB_USER:?}/diabetes-api-inference:${IMAGE_TAG:?}
     build:
       context: .
       dockerfile: apps/api-inference/Dockerfile
     container_name: diabetes-api-inference
     ports:
-      - "${API_PORT:-8000}:8000"
+      - "${API_PORT:?}:8000"
     environment:
       <<: *mlflow-client-env
-      MODEL_NAME: diabetes
+      MODEL_NAME: ${MODEL_NAME:?}
       # Registry alias resolved at startup: models:/<MODEL_NAME>@<MODEL_ALIAS>
-      MODEL_ALIAS: production
+      MODEL_ALIAS: ${MODEL_ALIAS:?}
       # Background poll of the alias; a new production version is picked up
       # without restarting the container (0 disables it).
-      MODEL_REFRESH_SECONDS: 60
+      MODEL_REFRESH_SECONDS: ${MODEL_REFRESH_SECONDS:?}
       # inference.logs lives in the training database (S5).
-      TRAIN_DB_HOST: postgres-train
-      TRAIN_DB_PORT: 5432
-      TRAIN_DB_NAME: diabetes
-      TRAIN_DB_USER: app
-      TRAIN_DB_PASSWORD: app
+      TRAIN_DB_HOST: ${TRAIN_DB_HOST:?}
+      TRAIN_DB_PORT: ${TRAIN_DB_PORT:?}
+      TRAIN_DB_NAME: ${TRAIN_DB_NAME:?}
+      TRAIN_DB_USER: ${TRAIN_DB_USER:?}
+      TRAIN_DB_PASSWORD: ${TRAIN_DB_PASSWORD:?}
     # On-disk spool for inference.logs rows written while postgres-train is
     # down (default INFERENCE_LOG_SPOOL_PATH=spool/inference-logs.jsonl under
     # /app); a named volume keeps them across container restarts.
@@ -207,8 +222,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "${API_CPUS:-1}"
-          memory: ${API_MEMORY:-1g}
+          cpus: "${API_CPUS:?}"
+          memory: ${API_MEMORY:?}
     depends_on:
       mlflow:
         condition: service_healthy
@@ -222,15 +237,15 @@ services:
   # S7 · Frontend (Streamlit UI; talks to the Inference API only)
   # ------------------------------------------------------------------------- #
   frontend:
-    image: ${DOCKERHUB_USER:-aristotekean}/diabetes-frontend:${IMAGE_TAG:-0.1.1}
+    image: ${DOCKERHUB_USER:?}/diabetes-frontend:${IMAGE_TAG:?}
     build:
       context: .
       dockerfile: apps/frontend/Dockerfile
     container_name: diabetes-frontend
     ports:
-      - "${FRONTEND_PORT:-8501}:8501"
+      - "${FRONTEND_PORT:?}:8501"
     environment:
-      API_URL: http://api-inference:8000
+      API_URL: ${API_URL:?}
     depends_on:
       - api-inference
     restart: unless-stopped

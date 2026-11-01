@@ -8,9 +8,12 @@
 #   docker login                                  # as $DOCKERHUB_USER
 #   scripts/publish_images.sh                     # build both platforms + push
 #   scripts/publish_images.sh --check             # build both platforms, no push
-#   IMAGE_TAG=0.1.1 scripts/publish_images.sh api-inference frontend
+#   IMAGE_TAG=0.1.2 scripts/publish_images.sh api-inference frontend
 #
-# Settings (env or .env): DOCKERHUB_USER, IMAGE_TAG, PLATFORMS, BUILDER.
+# Settings: DOCKERHUB_USER and IMAGE_TAG come from .env (a value exported in
+# the shell overrides it for one run); PLATFORMS and BUILDER from the shell.
+# After publishing a new tag, set it as IMAGE_TAG in .env so compose and
+# Kubernetes (infra/k8s/scripts/render-env.sh) deploy it.
 # The images are built from the working tree, so pushing a tree with
 # uncommitted changes is refused unless ALLOW_DIRTY=1: the published image must
 # match a commit of the repository.
@@ -20,16 +23,19 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-env_default() {
-    # Value of $1 from .env, the same file docker compose reads.
+env_value() {
+    # Value of $1 from .env, the same file docker compose reads (optional
+    # surrounding quotes removed).
     [[ -f .env ]] || return 0
-    sed -n "s/^$1=//p" .env | tail -n 1
+    sed -n "s/^$1=//p" .env | tail -n 1 | sed -e "s/^['\"]//" -e "s/['\"]$//"
 }
 
-DOCKERHUB_USER="${DOCKERHUB_USER:-$(env_default DOCKERHUB_USER)}"
-DOCKERHUB_USER="${DOCKERHUB_USER:-aristotekean}"
-IMAGE_TAG="${IMAGE_TAG:-$(env_default IMAGE_TAG)}"
-IMAGE_TAG="${IMAGE_TAG:-0.1.1}"
+DOCKERHUB_USER="${DOCKERHUB_USER:-$(env_value DOCKERHUB_USER)}"
+IMAGE_TAG="${IMAGE_TAG:-$(env_value IMAGE_TAG)}"
+if [[ -z "$DOCKERHUB_USER" || -z "$IMAGE_TAG" ]]; then
+    echo "DOCKERHUB_USER and IMAGE_TAG must be set in .env (cp .env.example .env)" >&2
+    exit 1
+fi
 PLATFORMS="${PLATFORMS:-linux/amd64,linux/arm64}"
 BUILDER="${BUILDER:-diabetes-multiarch}"
 ALL_COMPONENTS="api-inference frontend airflow"
@@ -49,7 +55,7 @@ components=""
 for arg in "$@"; do
     case "$arg" in
         --check) mode=check ;;
-        -h|--help) sed -n '2,19p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,21p' "$0"; exit 0 ;;
         *)
             dockerfile_for "$arg" >/dev/null \
                 || { echo "unknown component: $arg (use: $ALL_COMPONENTS)" >&2; exit 2; }

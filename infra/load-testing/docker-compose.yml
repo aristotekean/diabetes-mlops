@@ -10,7 +10,7 @@
 # On Server B, standalone (the API stack lives on Server A; this never starts it,
 # so the CPU spent simulating users does not compete with the API). The profile
 # is required here too, otherwise compose starts nothing:
-#   LOCUST_HOST=http://<SERVER_A>:<PORT> docker compose -f docker-compose.yml --profile loadtest up -d
+#   LOCUST_HOST=http://<SERVER_A>:<PORT> docker compose --env-file ../../.env -f docker-compose.yml --profile loadtest up -d
 #
 # Headless, same parameters for every run. The master coordinates the workers
 # (--expect-workers), so the traffic comes from LOCUST_WORKERS processes.
@@ -29,17 +29,19 @@
 #   LOCUST_STEP_LOAD=1 LOCUST_ARGS="--headless --csv /mnt/results/steps" \
 #   docker compose --profile loadtest up --abort-on-container-exit locust-master locust-worker
 #
-# Tunables (env or .env): LOCUST_HOST, LOCUST_WORKERS, LOCUST_PORT, LOCUST_ARGS,
-# LOCUST_STEP_LOAD, LOCUST_STEP_USERS, LOCUST_STEP_SECONDS, LOCUST_STEP_MAX_USERS.
+# Settings come from .env at the repository root (LOCUST_HOST, LOCUST_WORKERS,
+# LOCUST_PORT, LOCUST_ARGS, LOCUST_STEP_*; see .env.example). A variable set in
+# the shell, as in the examples above, overrides .env for that run. Standalone
+# runs from this folder pass the file with --env-file ../../.env.
 
 x-locust: &locust
   image: locustio/locust:2.46.7
   profiles: [ "loadtest" ]
   environment:
-    LOCUST_STEP_LOAD: ${LOCUST_STEP_LOAD:-0}
-    LOCUST_STEP_USERS: ${LOCUST_STEP_USERS:-10}
-    LOCUST_STEP_SECONDS: ${LOCUST_STEP_SECONDS:-60}
-    LOCUST_STEP_MAX_USERS: ${LOCUST_STEP_MAX_USERS:-100}
+    LOCUST_STEP_LOAD: ${LOCUST_STEP_LOAD:?}
+    LOCUST_STEP_USERS: ${LOCUST_STEP_USERS:?}
+    LOCUST_STEP_SECONDS: ${LOCUST_STEP_SECONDS:?}
+    LOCUST_STEP_MAX_USERS: ${LOCUST_STEP_MAX_USERS:?}
   volumes:
     - .:/mnt/locust:ro
 
@@ -49,10 +51,10 @@ services:
     container_name: diabetes-locust-master
     command: >-
       -f /mnt/locust/locustfile.py --master
-      --host ${LOCUST_HOST:-http://api-inference:8000}
-      --expect-workers ${LOCUST_WORKERS:-2} ${LOCUST_ARGS:-}
+      --host ${LOCUST_HOST:?}
+      --expect-workers ${LOCUST_WORKERS:?} ${LOCUST_ARGS?}
     ports:
-      - "${LOCUST_PORT:-8089}:8089"
+      - "${LOCUST_PORT:?}:8089"
     volumes:
       - .:/mnt/locust:ro
       - ./results:/mnt/results
@@ -63,6 +65,6 @@ services:
     <<: *locust
     command: -f /mnt/locust/locustfile.py --worker --master-host locust-master
     deploy:
-      replicas: ${LOCUST_WORKERS:-2}
+      replicas: ${LOCUST_WORKERS:?}
     depends_on:
       - locust-master

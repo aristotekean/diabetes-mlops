@@ -1,6 +1,7 @@
-# Web UI and REST API of the api-server container. The name is part of the
-# configuration: AIRFLOW__CORE__EXECUTION_API_SERVER_URL in configmap.yaml and
-# the compose hostname both point at `airflow-apiserver:8080`.
+# Web UI and REST API of the api-server container, reached by the Ingress. The
+# name matches the compose hostname `airflow-apiserver:8080`; inside the pod the
+# task runners use localhost instead (AIRFLOW__CORE__EXECUTION_API_SERVER_URL
+# in base/airflow/kustomization.yaml).
 apiVersion: v1
 kind: Service
 metadata:

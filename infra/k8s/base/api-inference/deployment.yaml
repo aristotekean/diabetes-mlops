@@ -1,6 +1,6 @@
 # Mirror of the `api-inference` service in docker-compose.yml. The image is
-# referenced by name only: its tag is set once in the root kustomization
-# (`images:`), so a release bumps a single newTag.
+# referenced by name only: infra/k8s/generated sets DOCKERHUB_USER/IMAGE_TAG
+# from .env. ConfigMaps and Secrets referenced below are rendered from .env too.
 #
 # The API tolerates a missing model (it starts `unavailable`, answers 200 on
 # /health and 503 on /predict, and keeps polling the registry), so the pod only
@@ -117,21 +117,13 @@ spec:
             # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY for artifact download.
             - secretRef:
                 name: minio-credentials
+            # MODEL_NAME / MODEL_ALIAS (resolved as models:/<name>@<alias>),
+            # MODEL_REFRESH_SECONDS (background poll of the alias, 0 disables
+            # it) and TRAIN_DB_HOST / TRAIN_DB_PORT, from .env.
+            - configMapRef:
+                name: api-inference-env
           env:
-            - name: MODEL_NAME
-              value: diabetes
-            # Registry alias resolved at startup: models:/<MODEL_NAME>@<MODEL_ALIAS>
-            - name: MODEL_ALIAS
-              value: production
-            # Background poll of the alias; a new production version is picked
-            # up without a restart (0 disables it).
-            - name: MODEL_REFRESH_SECONDS
-              value: "60"
             # inference.logs lives in the training database (S5).
-            - name: TRAIN_DB_HOST
-              value: postgres-train
-            - name: TRAIN_DB_PORT
-              value: "5432"
             - name: TRAIN_DB_NAME
               valueFrom:
                 secretKeyRef:

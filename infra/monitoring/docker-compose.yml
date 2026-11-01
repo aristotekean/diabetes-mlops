@@ -11,17 +11,19 @@
 # Monitoring only (naming a service enables its profile):
 #   docker compose up -d prometheus grafana
 #   Prometheus UI on http://localhost:9090
-#   Grafana     UI on http://localhost:3000   (admin / admin)
+#   Grafana     UI on http://localhost:3000   (GRAFANA_ADMIN_USER / _PASSWORD)
 #   The "Diabetes · Inference API" dashboard is provisioned automatically.
 #
 # On a dedicated Server C (the API stack lives on Server A): run this file on
 # its own and point Prometheus at Server A by editing the scrape target in
 # prometheus/prometheus.yml (see infra/monitoring/README.md). The profile is
-# required here too, otherwise compose starts nothing:
-#   docker compose -f docker-compose.yml --profile monitoring up -d
+# required here too, otherwise compose starts nothing; the settings file is
+# passed explicitly because the project directory is then this folder:
+#   docker compose --env-file ../../.env -f docker-compose.yml --profile monitoring up -d
 #
-# Tunables (env or .env): PROMETHEUS_PORT, GRAFANA_PORT,
-# GRAFANA_ADMIN_USER, GRAFANA_ADMIN_PASSWORD, PROMETHEUS_RETENTION.
+# Settings come from .env at the repository root (PROMETHEUS_PORT,
+# PROMETHEUS_RETENTION, GRAFANA_PORT, GRAFANA_ADMIN_USER,
+# GRAFANA_ADMIN_PASSWORD; see .env.example).
 
 services:
   # ------------------------------------------------------------------------- #
@@ -34,10 +36,10 @@ services:
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus
-      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-15d}
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:?}
       - --web.enable-lifecycle
     ports:
-      - "${PROMETHEUS_PORT:-9090}:9090"
+      - "${PROMETHEUS_PORT:?}:9090"
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./prometheus/targets:/etc/prometheus/targets:ro
@@ -62,13 +64,13 @@ services:
     profiles: [ "monitoring" ]
     container_name: diabetes-grafana
     environment:
-      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:?}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?}
       GF_USERS_ALLOW_SIGN_UP: "false"
       # Land on the provisioned dashboard straight away.
       GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/diabetes-api.json
     ports:
-      - "${GRAFANA_PORT:-3000}:3000"
+      - "${GRAFANA_PORT:?}:3000"
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - ./grafana/dashboards:/var/lib/grafana/dashboards:ro

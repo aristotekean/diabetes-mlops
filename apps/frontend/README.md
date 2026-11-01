@@ -26,7 +26,7 @@ Con el stack completo, desde la raíz del repositorio:
 
 ```bash
 docker compose up -d --build frontend
-# http://localhost:8501  (puerto configurable con FRONTEND_PORT)
+# http://localhost:8501  (FRONTEND_PORT y API_URL se definen en el .env de la raíz)
 ```
 
 ## Pruebas

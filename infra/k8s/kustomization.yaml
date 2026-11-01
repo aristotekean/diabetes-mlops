@@ -1,14 +1,15 @@
 # Kustomize root for Server A of the diabetes MLOps stack on Kubernetes
 # (OrbStack locally; any cluster with a default StorageClass otherwise).
 #
-# Usage:
+# Usage (configuration and image tags come from .env at the repository root):
+#   bash infra/k8s/scripts/render-env.sh  # .env -> generated/ (after every change)
 #   kubectl apply -k infra/k8s            # deploy / update everything
 #   kubectl kustomize infra/k8s           # render the manifests only
 #   kubectl -n diabetes get pods          # watch the rollout
 #
-# Everything lands in the `diabetes` namespace. Project images are pinned here
-# in one place (`images:`) so a release only bumps the three newTag values.
-# Third-party images follow docker-compose.yml: postgres and mlflow are pinned
+# Everything lands in the `diabetes` namespace. Project images are named
+# without a tag in the manifests; generated/ rewrites them to
+# DOCKERHUB_USER/<image>:IMAGE_TAG from .env. Third-party images follow docker-compose.yml: postgres and mlflow are pinned
 # in their own manifests; MinIO deliberately tracks
 # `cgr.dev/chainguard/minio:latest` (pinning it is out of scope for now).
 apiVersion: kustomize.config.k8s.io/v1beta1
@@ -36,14 +37,8 @@ resources:
   - base/airflow
   - base/ingress
 
-# Published multi-arch (amd64 + arm64) images built from this repository.
-# The service manifests (base/api-inference, base/frontend, base/airflow)
-# reference them by name without a tag; kustomize rewrites each matching image
-# to name:newTag here, so this block is the single place to bump a release.
-images:
-  - name: aristotekean/diabetes-api-inference
-    newTag: "0.1.1"
-  - name: aristotekean/diabetes-frontend
-    newTag: "0.1.1"
-  - name: aristotekean/diabetes-airflow
-    newTag: "0.1.1"
+# ConfigMaps, Secrets and project image tags rendered from .env by
+# scripts/render-env.sh (git-ignored: it holds the credentials). Without it the
+# build fails with "generated: no such file or directory": render it first.
+components:
+  - generated

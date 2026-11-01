@@ -66,17 +66,18 @@ docker compose --profile monitoring up -d      # stack completo + monitoreo
 
 También es un stack autónomo (Server C): se levanta por su cuenta desde esta
 carpeta, sin depender del resto. El perfil es obligatorio también aquí, sin él
-compose no arranca nada:
+compose no arranca nada, y el `.env` de la raíz se pasa con `--env-file` porque
+el directorio del proyecto pasa a ser esta carpeta:
 
 ```bash
 cd infra/monitoring
-docker compose -f docker-compose.yml --profile monitoring up -d
+docker compose --env-file ../../.env -f docker-compose.yml --profile monitoring up -d
 ```
 
 | Servicio | URL | Credenciales |
 |----------|-----|--------------|
 | Prometheus | <http://localhost:9090> | — |
-| Grafana | <http://localhost:3000> | `admin` / `admin` |
+| Grafana | <http://localhost:3000> | `GRAFANA_ADMIN_USER` / `GRAFANA_ADMIN_PASSWORD` del `.env` (`admin` / `admin` en `.env.example`) |
 
 Grafana abre directamente en el dashboard **Diabetes · Inference API** (datasource
 y dashboard se aprovisionan solos desde `grafana/provisioning`).
@@ -101,7 +102,7 @@ docker compose up -d
 
 # 2) el monitoreo conectado a la red de la API
 cd infra/monitoring
-docker compose -f docker-compose.yml -f docker-compose.integration.yml --profile monitoring up -d
+docker compose --env-file ../../.env -f docker-compose.yml -f docker-compose.integration.yml --profile monitoring up -d
 ```
 
 Ahora el target `diabetes-api` pasa a **UP** y los paneles se llenan. `file_sd`
@@ -141,15 +142,20 @@ de Tailscale. Esta es la forma **instalando Tailscale en el host** de Server C
    > con `network_mode: host` para que use el MagicDNS del host.
 5. **Levantar el monitoreo** normal:
    ```bash
-   docker compose -f docker-compose.yml --profile monitoring up -d
+   docker compose --env-file ../../.env -f docker-compose.yml --profile monitoring up -d
    ```
 
 Así Server C alcanza la API de Server A **de forma privada por la tailnet**, sin
 abrir puertos públicos y sin cambiar el stack de monitoreo.
 
-## Variables de entorno (opcionales)
+## Variables de entorno
 
-| Variable | Default | Descripción |
+Se definen en el `.env` de la raíz del repositorio (plantilla en
+[`.env.example`](../../.env.example)); compose no trae valores por defecto y se
+detiene si falta alguna. En un Server C dedicado basta copiar ese `.env` con
+estas cinco variables.
+
+| Variable | Valor en `.env.example` | Descripción |
 |----------|---------|-------------|
 | `PROMETHEUS_PORT` | `9090` | puerto publicado de Prometheus |
 | `PROMETHEUS_RETENTION` | `15d` | retención de la TSDB |
@@ -163,7 +169,6 @@ abrir puertos públicos y sin cambiar el stack de monitoreo.
 infra/monitoring/
 ├── docker-compose.yml                    S8 Prometheus + S9 Grafana (independiente)
 ├── docker-compose.integration.yml        overlay: conecta Prometheus a la red de la API
-├── .env.example                          variables (puertos, admin de Grafana)
 ├── prometheus/
 │   ├── prometheus.yml                    configuración de scrape (file_sd)
 │   └── targets/
