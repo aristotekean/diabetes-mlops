@@ -346,3 +346,38 @@ Si ya habías ejecutado la versión anterior del DAG, los datos en
 `postgres-train` y el modelo `diabetes` corresponden a la carga completa v1.
 Para repetir la carga incremental desde cero, elimina los volúmenes de datos:
 `docker compose down && docker volume rm diabetes_postgres_train diabetes_mlflow_db diabetes_minio`.
+
+## Evidencias
+
+Capturas del despliegue en funcionamiento. La arquitectura general está al
+inicio de este documento.
+
+### Imágenes publicadas en Docker Hub
+
+![Imágenes en Docker Hub](docs/images/2-docker-hub-images.png)
+
+### Clúster de Kubernetes
+
+![Clúster de Kubernetes](docs/images/3-kubernetes-cluster.png)
+
+![Pods en ejecución](docs/images/3-1-kubernetes-pods.png)
+
+![Controladores del clúster](docs/images/3-2-kubernetes-ctrl.png)
+
+### Airflow
+
+![DAG de entrenamiento en Airflow](docs/images/4-airflow.png)
+
+### API de inferencia
+
+![API de inferencia](docs/images/5-api-inference.png)
+
+### Frontend
+
+![Frontend](docs/images/6-frontend.png)
+
+![Predicción desde el frontend](docs/images/6-1-frontend-prediction.png)
+
+### MLflow
+
+![Experimentos en MLflow](docs/images/7-mlflow-experiments.png)
