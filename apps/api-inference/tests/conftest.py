@@ -112,6 +112,10 @@ def make_settings(**overrides: Any) -> Settings:
         "model_load_retries": 2,
         "model_load_backoff_seconds": 0.0,
         "train_database_url": "postgresql://app:app@localhost:5432/diabetes",
+        # Spool disabled by default so a failing fake repository behaves as
+        # before (row counted as lost); spool tests pass a tmp path explicitly.
+        "inference_log_spool_path": "",
+        "inference_log_replay_seconds": 0,
     }
     base.update(overrides)
     return Settings(**base)

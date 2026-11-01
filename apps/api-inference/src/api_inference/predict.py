@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -12,9 +13,10 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from api_inference.metrics import INFERENCE_LOG_FAILURES, PREDICTION_DURATION, PREDICTIONS
+from api_inference.metrics import PREDICTION_DURATION, PREDICTIONS
 from api_inference.model import ModelNotLoadedError, ModelService
 from api_inference.repository import FeedbackRecord, InferenceLogRecord, InferenceLogRepository
+from api_inference.spool import DurableInferenceLog
 from api_inference.schemas import (
     FeedbackRequest,
     FeedbackResponse,
@@ -43,15 +45,9 @@ def _error_response(
     )
 
 
-async def _safe_log(repository: InferenceLogRepository, record: InferenceLogRecord) -> bool:
-    """Persist the row; never let a logging failure break the response."""
-    try:
-        await repository.log(record)
-        return True
-    except Exception:
-        INFERENCE_LOG_FAILURES.inc()
-        logger.exception("inference log write failed for request %s", record.request_id)
-        return False
+async def _safe_log(inference_log: DurableInferenceLog, record: InferenceLogRecord) -> bool:
+    """Persist (or spool) the row; a logging failure never breaks the response."""
+    return await inference_log.write(record)
 
 
 def input_data_from_body(body: Any) -> dict[str, Any]:
@@ -73,12 +69,17 @@ def request_id_from_body(body: Any) -> UUID:
     return uuid4()
 
 
-def build_router(service: ModelService, repository: InferenceLogRepository) -> APIRouter:
+def build_router(
+    service: ModelService,
+    repository: InferenceLogRepository,
+    inference_log: DurableInferenceLog,
+) -> APIRouter:
     router = APIRouter(tags=["inference"])
 
     @router.post(PREDICT_PATH, response_model=PredictResponse)
     async def predict(payload: PredictRequest, request: Request) -> Any:
         request_id = payload.request_id or uuid4()
+        requested_at = datetime.now(UTC)
         # The exact submitted object is what the audit log stores; the
         # validated copy (same keys) is what the model receives.
         raw_body = await request.json()
@@ -90,11 +91,12 @@ def build_router(service: ModelService, repository: InferenceLogRepository) -> A
         except ModelNotLoadedError as exc:
             PREDICTIONS.labels(status="model_unavailable").inc()
             await _safe_log(
-                repository,
+                inference_log,
                 InferenceLogRecord(
                     request_id=request_id,
                     input_data=submitted,
                     status="failed",
+                    requested_at=requested_at,
                     model_name=service.name,
                     model_alias=service.alias,
                     error_code="model_unavailable",
@@ -109,11 +111,12 @@ def build_router(service: ModelService, repository: InferenceLogRepository) -> A
             PREDICTIONS.labels(status="inference_error").inc()
             logger.exception("inference failed for request %s", request_id)
             await _safe_log(
-                repository,
+                inference_log,
                 InferenceLogRecord(
                     request_id=request_id,
                     input_data=submitted,
                     status="failed",
+                    requested_at=requested_at,
                     model_name=loaded.name if loaded else service.name,
                     model_version=loaded.version if loaded else None,
                     model_alias=loaded.alias if loaded else service.alias,
@@ -136,6 +139,7 @@ def build_router(service: ModelService, repository: InferenceLogRepository) -> A
             request_id=request_id,
             input_data=submitted,
             status="succeeded",
+            requested_at=requested_at,
             prediction=result.prediction,
             probabilities=result.probabilities,
             model_name=result.model.name,
@@ -143,7 +147,7 @@ def build_router(service: ModelService, repository: InferenceLogRepository) -> A
             model_alias=result.model.alias,
             processing_time_ms=processing_time_ms,
         )
-        await _safe_log(repository, record)
+        await _safe_log(inference_log, record)
         return PredictResponse(
             request_id=request_id,
             prediction=result.prediction,
@@ -193,7 +197,7 @@ def build_router(service: ModelService, repository: InferenceLogRepository) -> A
     return router
 
 
-def build_validation_handler(repository: InferenceLogRepository):
+def build_validation_handler(inference_log: DurableInferenceLog):
     """422 handler that also writes a ``failed`` row for /predict requests."""
 
     async def handler(request: Request, exc: RequestValidationError) -> JSONResponse:
@@ -207,11 +211,12 @@ def build_validation_handler(repository: InferenceLogRepository):
                 for error in errors
             )
             await _safe_log(
-                repository,
+                inference_log,
                 InferenceLogRecord(
                     request_id=request_id,
                     input_data=input_data_from_body(exc.body),
                     status="failed",
+                    requested_at=datetime.now(UTC),
                     error_code="validation_error",
                     error_message=message[:_MAX_ERROR_MESSAGE],
                 ),

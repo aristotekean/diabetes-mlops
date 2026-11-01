@@ -150,6 +150,13 @@ spec:
           ports:
             - name: http
               containerPort: 8000
+          volumeMounts:
+            # inference.logs rows written while postgres-train is down wait
+            # here (INFERENCE_LOG_SPOOL_PATH defaults to spool/... under /app)
+            # and are replayed by the API. emptyDir survives a database
+            # outage and container restarts, not a pod reschedule.
+            - name: inference-log-spool
+              mountPath: /app/spool
           # Same ceiling as compose (API_CPUS=1, API_MEMORY=1g); the requests
           # leave room for MLflow/Postgres on a single small node.
           resources:
@@ -188,3 +195,6 @@ spec:
           configMap:
             name: train-db-migrations
             defaultMode: 0444
+        - name: inference-log-spool
+          emptyDir:
+            sizeLimit: 256Mi
