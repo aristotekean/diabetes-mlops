@@ -14,12 +14,19 @@ from fastapi.responses import JSONResponse
 
 from api_inference.metrics import INFERENCE_LOG_FAILURES, PREDICTION_DURATION, PREDICTIONS
 from api_inference.model import ModelNotLoadedError, ModelService
-from api_inference.repository import InferenceLogRecord, InferenceLogRepository
-from api_inference.schemas import ModelIdentity, PredictRequest, PredictResponse
+from api_inference.repository import FeedbackRecord, InferenceLogRecord, InferenceLogRepository
+from api_inference.schemas import (
+    FeedbackRequest,
+    FeedbackResponse,
+    ModelIdentity,
+    PredictRequest,
+    PredictResponse,
+)
 
 logger = logging.getLogger(__name__)
 
 PREDICT_PATH = "/predict"
+FEEDBACK_PATH = "/predict/{request_id}/feedback"
 _MAX_RAW_BODY = 2_000
 _MAX_ERROR_MESSAGE = 2_000
 
@@ -145,6 +152,42 @@ def build_router(service: ModelService, repository: InferenceLogRepository) -> A
                 name=result.model.name, version=result.model.version, alias=result.model.alias
             ),
             processing_time_ms=processing_time_ms,
+        )
+
+    @router.post(FEEDBACK_PATH, response_model=FeedbackResponse)
+    async def feedback(request_id: UUID, payload: FeedbackRequest) -> Any:
+        """Attach the observed outcome to a logged request (upsert).
+
+        Unlike the inference log, feedback is never spooled: the caller owns
+        the label and gets a 503 to retry when the database is unavailable.
+        """
+        try:
+            logged = await repository.get_log(request_id)
+            if logged is None:
+                return _error_response(
+                    status.HTTP_404_NOT_FOUND,
+                    request_id,
+                    "unknown_request",
+                    "no inference request with this request_id was logged",
+                )
+            created = await repository.upsert_feedback(
+                FeedbackRecord(
+                    request_id=request_id, readmitted=payload.readmitted, source=payload.source
+                )
+            )
+        except Exception:
+            logger.exception("feedback write failed for request %s", request_id)
+            return _error_response(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                request_id,
+                "database_unavailable",
+                "the feedback could not be stored; retry later",
+            )
+        return FeedbackResponse(
+            request_id=request_id,
+            readmitted=payload.readmitted,
+            prediction=logged.prediction,
+            created=created,
         )
 
     return router

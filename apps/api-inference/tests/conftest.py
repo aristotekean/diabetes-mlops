@@ -6,6 +6,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
+from uuid import UUID
 
 import httpx
 import numpy as np
@@ -14,7 +15,7 @@ from diabetes_model.contract import INPUT_COLUMNS, NUMERIC_INPUTS
 
 from api_inference.main import create_app
 from api_inference.model import ModelLoadError, ModelService, RegisteredVersion
-from api_inference.repository import InferenceLogRecord
+from api_inference.repository import FeedbackRecord, InferenceLogRecord, LoggedRequest
 from api_inference.settings import Settings
 
 # sklearn sorts classes lexicographically, so this is the realistic order.
@@ -65,8 +66,10 @@ class FakeRegistry:
 @dataclass
 class InMemoryRepository:
     rows: list[InferenceLogRecord] = field(default_factory=list)
+    feedback: dict[UUID, FeedbackRecord] = field(default_factory=dict)
     fail_ping: bool = False
     fail_log: bool = False
+    fail_feedback: bool = False
     opened: bool = False
 
     async def open(self) -> None:
@@ -83,6 +86,21 @@ class InMemoryRepository:
         if self.fail_log:
             raise RuntimeError("insert failed")
         self.rows.append(record)
+
+    async def get_log(self, request_id: UUID) -> LoggedRequest | None:
+        for row in self.rows:
+            if row.request_id == request_id:
+                return LoggedRequest(
+                    request_id=row.request_id, status=row.status, prediction=row.prediction
+                )
+        return None
+
+    async def upsert_feedback(self, record: FeedbackRecord) -> bool:
+        if self.fail_feedback:
+            raise RuntimeError("upsert failed")
+        created = record.request_id not in self.feedback
+        self.feedback[record.request_id] = record
+        return created
 
 
 def make_settings(**overrides: Any) -> Settings:

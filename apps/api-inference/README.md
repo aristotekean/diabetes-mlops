@@ -12,6 +12,7 @@ MLflow (`models:/diabetes@production`), registra cada inferencia en la tabla
 | GET    | `/model-info`   | Nombre, alias, versión, `run_id`, estado (`ready`/`unavailable`), `loaded_at`, última comprobación del alias y último error. |
 | POST   | `/model/reload` | Fuerza la recarga de la versión apuntada por el alias. Devuelve `previous_version`, `current_version` y `changed`. `503` si la carga falla (se conserva la versión anterior). |
 | POST   | `/predict`      | Una observación por petición. Contrato en `docs/data-contract.md`. |
+| POST   | `/predict/{request_id}/feedback` | Registra el resultado real (`readmitted`) de una petición ya registrada. Alimenta `inference.training_examples`. |
 | GET    | `/metrics`      | Exposición Prometheus (`text/plain; version=0.0.4`). |
 
 ### `POST /predict`
@@ -48,6 +49,34 @@ Respuesta `200`:
 Errores: `422` (`validation_error`), `503` (`model_unavailable`), `500`
 (`inference_error`). El cuerpo incluye `request_id` y
 `detail.error_code`/`detail.message`.
+
+### `POST /predict/{request_id}/feedback`
+
+Cierra el ciclo de reentrenamiento: asocia el resultado observado a una
+petición ya registrada en `inference.logs`.
+
+```json
+{ "readmitted": "<30", "source": "ehr" }
+```
+
+- `readmitted` ∈ {`NO`, `>30`, `<30`}, el mismo dominio que
+  `clean.records.target_readmitted`. `source` es texto libre opcional (máx.
+  200 caracteres) con el origen de la etiqueta.
+- Semántica *upsert*: una segunda llamada para el mismo `request_id`
+  reemplaza la etiqueta (`created: false`). Así una corrección posterior gana.
+- Se admite feedback para peticiones fallidas (`prediction: null`), de modo que
+  una observación mal puntuada también puede entrar al dataset.
+
+Respuesta `200`:
+
+```json
+{ "request_id": "UUID", "readmitted": "<30", "prediction": "NO", "created": true }
+```
+
+Errores: `404` (`unknown_request`, no hay fila en `inference.logs`), `422`
+(etiqueta o cuerpo inválidos), `503` (`database_unavailable`: la escritura
+falló; a diferencia del log de inferencia, el feedback **no** se encola, el
+cliente debe reintentar).
 
 ## Estrategia de carga del modelo
 
@@ -90,6 +119,16 @@ base de datos de entrenamiento (`postgres-train`, esquema creado por
 
 `processing_time_ms` mide normalización más inferencia; no incluye la
 escritura en base de datos.
+
+### Ground truth: `inference.feedback` y `inference.training_examples`
+
+`infra/database/migrations/003_inference_feedback.sql` añade la tabla
+`inference.feedback` (una etiqueta por `request_id`, FK a `inference.logs`) y
+la vista `inference.training_examples`, que une cada predicción exitosa con su
+etiqueta observada (`features`, `readmitted`, `predicted_readmitted`, identidad
+del modelo). Esa vista es la entrada para reentrenar con datos de producción:
+sus columnas `features`/`readmitted` espejan `clean.records`
+(`features`/`target_readmitted`).
 
 **Decisión:** la escritura se espera dentro de la petición, pero si falla
 (base de datos caída, `request_id` duplicado, etc.) se registra la excepción,
