@@ -270,3 +270,30 @@ including failed requests. `input_data` is the exact submitted feature object;
 success. `status`, `error_code`, and `error_message` describe failures. The
 `request_id` is the idempotency and audit key and must be returned to the
 caller. Do not store patient identifiers in inference inputs.
+
+### Feedback (ground truth)
+
+`POST /predict/{request_id}/feedback` attaches the observed outcome to a
+logged request:
+
+```json
+{ "readmitted": "<30", "source": "ehr" }
+```
+
+`readmitted` uses the target domain (`NO`, `>30`, `<30`); `source` is an
+optional free-text origin (max 200 characters). One label per `request_id`:
+a later call replaces the previous label. Response `200`:
+
+```json
+{ "request_id": "UUID", "readmitted": "<30", "prediction": "NO", "created": true }
+```
+
+`prediction` is `null` when the logged request failed. Errors: `404`
+`unknown_request` (no `inference.logs` row), `422` (invalid body), `503`
+`database_unavailable` (the caller must retry; feedback is never buffered).
+
+Rows land in `inference.feedback` (`003_inference_feedback.sql`). The view
+`inference.training_examples` joins every succeeded `inference.logs` row with
+its label and exposes `features` / `readmitted` with the same shape as
+`clean.records` (`features` / `target_readmitted`), so a retraining pipeline
+can union both sources.

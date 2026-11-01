@@ -31,6 +31,24 @@ class InferenceLogRecord:
     error_message: str | None = None
 
 
+@dataclass(frozen=True)
+class LoggedRequest:
+    """The subset of an ``inference.logs`` row that feedback needs to see."""
+
+    request_id: UUID
+    status: str
+    prediction: str | None
+
+
+@dataclass(frozen=True)
+class FeedbackRecord:
+    """Mirror of the ``inference.feedback`` columns written by the API."""
+
+    request_id: UUID
+    readmitted: str  # one of diabetes_model.contract.TARGET_CLASSES
+    source: str | None = None
+
+
 class InferenceLogRepository(Protocol):
     async def open(self) -> None: ...
 
@@ -39,6 +57,12 @@ class InferenceLogRepository(Protocol):
     async def ping(self) -> None: ...
 
     async def log(self, record: InferenceLogRecord) -> None: ...
+
+    async def get_log(self, request_id: UUID) -> LoggedRequest | None: ...
+
+    async def upsert_feedback(self, record: FeedbackRecord) -> bool:
+        """Insert or replace the label; ``True`` when the row was created."""
+        ...
 
 
 _INSERT = """
@@ -51,6 +75,24 @@ INSERT INTO inference.logs (
     %(model_name)s, %(model_version)s, %(model_alias)s, %(processing_time_ms)s,
     %(status)s, %(error_code)s, %(error_message)s
 )
+"""
+
+_SELECT_LOG = """
+SELECT request_id, status, prediction #>> '{}'
+FROM inference.logs
+WHERE request_id = %(request_id)s
+"""
+
+# ``xmax = 0`` is true only for a freshly inserted row, so one round trip
+# tells whether the label was created or replaced.
+_UPSERT_FEEDBACK = """
+INSERT INTO inference.feedback (request_id, readmitted, source, recorded_at)
+VALUES (%(request_id)s, %(readmitted)s, %(source)s, CURRENT_TIMESTAMP)
+ON CONFLICT (request_id) DO UPDATE SET
+    readmitted = EXCLUDED.readmitted,
+    source = EXCLUDED.source,
+    recorded_at = EXCLUDED.recorded_at
+RETURNING (xmax = 0) AS created
 """
 
 
@@ -119,3 +161,22 @@ class PostgresInferenceLogRepository:
         }
         async with self._require_pool().connection() as conn:
             await conn.execute(_INSERT, params)
+
+    async def get_log(self, request_id: UUID) -> LoggedRequest | None:
+        async with self._require_pool().connection() as conn:
+            cursor = await conn.execute(_SELECT_LOG, {"request_id": request_id})
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        return LoggedRequest(request_id=row[0], status=row[1], prediction=row[2])
+
+    async def upsert_feedback(self, record: FeedbackRecord) -> bool:
+        params = {
+            "request_id": record.request_id,
+            "readmitted": record.readmitted,
+            "source": record.source,
+        }
+        async with self._require_pool().connection() as conn:
+            cursor = await conn.execute(_UPSERT_FEEDBACK, params)
+            row = await cursor.fetchone()
+        return bool(row and row[0])

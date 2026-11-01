@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from diabetes_model.contract import INPUT_COLUMNS, NUMERIC_INPUTS
+from diabetes_model.contract import INPUT_COLUMNS, NUMERIC_INPUTS, TARGET_CLASSES
 from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt, StrictStr, create_model
 
 
@@ -101,3 +101,31 @@ class PredictResponse(BaseModel):
     probabilities: dict[str, float] | None
     model: ModelIdentity
     processing_time_ms: float
+
+
+# --------------------------------------------------------------------------- #
+# /predict/{request_id}/feedback
+# --------------------------------------------------------------------------- #
+ReadmittedLabel = Literal[TARGET_CLASSES]  # type: ignore[valid-type]
+
+
+class FeedbackRequest(BaseModel):
+    """Observed outcome for a request already stored in ``inference.logs``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    readmitted: ReadmittedLabel = Field(
+        description="Observed readmission outcome; same domain as the training target."
+    )
+    source: str | None = Field(
+        default=None, max_length=200, description="Free-text origin of the label (EHR, audit...)."
+    )
+
+
+class FeedbackResponse(BaseModel):
+    request_id: UUID
+    readmitted: ReadmittedLabel
+    prediction: str | None = Field(
+        description="Label the model returned for this request; null when it failed to score."
+    )
+    created: bool = Field(description="False when a previous label was replaced.")
