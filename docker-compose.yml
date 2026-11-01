@@ -199,6 +199,11 @@ services:
       TRAIN_DB_NAME: diabetes
       TRAIN_DB_USER: app
       TRAIN_DB_PASSWORD: app
+    # On-disk spool for inference.logs rows written while postgres-train is
+    # down (default INFERENCE_LOG_SPOOL_PATH=spool/inference-logs.jsonl under
+    # /app); a named volume keeps them across container restarts.
+    volumes:
+      - api-inference-spool:/app/spool
     deploy:
       resources:
         limits:
@@ -231,6 +236,8 @@ services:
     restart: unless-stopped
 
 volumes:
+  api-inference-spool:
+    name: diabetes_api_inference_spool
   mlflow-db-data:
     name: diabetes_mlflow_db
   minio-data:

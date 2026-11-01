@@ -130,11 +130,27 @@ del modelo). Esa vista es la entrada para reentrenar con datos de producción:
 sus columnas `features`/`readmitted` espejan `clean.records`
 (`features`/`target_readmitted`).
 
-**Decisión:** la escritura se espera dentro de la petición, pero si falla
-(base de datos caída, `request_id` duplicado, etc.) se registra la excepción,
-se incrementa `inference_log_failures_total` y la predicción se devuelve igual.
-Se prioriza servir la inferencia sobre la trazabilidad estricta; la métrica
-permite alertar sobre la pérdida de filas.
+**Decisión:** la escritura se espera dentro de la petición y la predicción se
+devuelve igual aunque falle. Lo que cambia es qué pasa con la fila:
+
+- **Fallo transitorio** (base de datos caída, timeout de conexión): la fila se
+  anexa a un *spool* en disco (`INFERENCE_LOG_SPOOL_PATH`, JSONL, una fila por
+  línea, `fsync` por escritura) y se incrementa `inference_log_spooled_total`.
+  Una tarea en segundo plano reintenta cada `INFERENCE_LOG_REPLAY_SECONDS`
+  (también al arrancar, así se recuperan las filas de un proceso anterior),
+  reinsertando en el orden original y deteniéndose en el primer fallo
+  transitorio sin perder el resto. `inference_log_spool_pending` expone la
+  cola.
+- **Fallo permanente** (`IntegrityError`/`DataError` de psycopg, p. ej.
+  `request_id` duplicado o una fila ya insertada antes de perder la conexión):
+  reintentar no sirve, la fila se descarta y cuenta en
+  `inference_log_failures_total`.
+
+Con el spool, "registrar cada solicitud" sobrevive a una caída de Postgres. El
+límite es el disco del proceso: en Kubernetes el volumen es `emptyDir`, así que
+sobrevive a la caída de la base de datos pero no a reprogramar el pod; en
+compose es un volumen con nombre. El feedback (`/predict/{id}/feedback`) no se
+encola: responde `503` y el cliente reintenta.
 
 ## Métricas
 
@@ -149,7 +165,10 @@ reconocidas se agrupan bajo `path="unmatched"` y `/metrics` no se contabiliza.
 | `http_requests_in_progress` | — | Peticiones en curso. |
 | `predictions_total` | `status` | Resultado de `/predict`: `succeeded`, `validation_error`, `model_unavailable`, `inference_error`. |
 | `prediction_duration_seconds` | — | Latencia de normalización + inferencia. |
-| `inference_log_failures_total` | — | Filas de `inference.logs` no escritas. |
+| `inference_log_failures_total` | — | Filas de `inference.logs` perdidas definitivamente (rechazadas por la base de datos o imposibles de encolar). |
+| `inference_log_spooled_total` | — | Filas enviadas al spool en disco por base de datos no disponible. |
+| `inference_log_replayed_total` | — | Filas del spool que luego llegaron a la base de datos. |
+| `inference_log_spool_pending` | — | Filas esperando en el spool ahora mismo. |
 | `model_info` | `name`, `version`, `alias` | Vale 1 para la versión servida; se reinicia en cada recarga. |
 | `model_reloads_total` | `result` | Intentos de carga (`success`/`failure`). |
 
@@ -167,6 +186,8 @@ Además se exportan los colectores por defecto (`process_*` en Linux,
 | `TRAIN_DATABASE_URL` | — | DSN completo; tiene prioridad sobre las partes. |
 | `TRAIN_DB_HOST` / `TRAIN_DB_PORT` / `TRAIN_DB_NAME` / `TRAIN_DB_USER` / `TRAIN_DB_PASSWORD` | `—/5432/—/—/—` | Partes del DSN de `inference.logs`. |
 | `DB_POOL_MIN` / `DB_POOL_MAX` | `1` / `4` | Tamaño del pool async de psycopg. |
+| `INFERENCE_LOG_SPOOL_PATH` | `spool/inference-logs.jsonl` | Spool en disco para filas de `inference.logs` que la base de datos no aceptó (relativo al directorio de trabajo, `/app` en la imagen). Vacío lo desactiva. |
+| `INFERENCE_LOG_REPLAY_SECONDS` | `15` | Periodo del reintento en segundo plano del spool; `0` lo desactiva. |
 | `LOG_LEVEL` | `INFO` | Nivel de logging estándar. |
 
 ## Desarrollo local

@@ -57,7 +57,20 @@ PREDICTION_DURATION = Histogram(
 )
 INFERENCE_LOG_FAILURES = Counter(
     "inference_log_failures_total",
-    "inference.logs rows that could not be written (prediction still served).",
+    "inference.logs rows lost for good: rejected by the database or unspoolable "
+    "(prediction still served).",
+)
+INFERENCE_LOG_SPOOLED = Counter(
+    "inference_log_spooled_total",
+    "inference.logs rows written to the on-disk spool because the database was unavailable.",
+)
+INFERENCE_LOG_REPLAYED = Counter(
+    "inference_log_replayed_total",
+    "Spooled inference.logs rows that later reached the database.",
+)
+INFERENCE_LOG_SPOOL_PENDING = Gauge(
+    "inference_log_spool_pending",
+    "inference.logs rows currently waiting in the on-disk spool.",
 )
 MODEL_INFO = Gauge(
     "model_info",

@@ -8,6 +8,7 @@ import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import asdict
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Response, status
 from fastapi.exceptions import RequestValidationError
@@ -18,6 +19,7 @@ from api_inference.predict import build_router, build_validation_handler
 from api_inference.repository import InferenceLogRepository, PostgresInferenceLogRepository
 from api_inference.schemas import ErrorDetail, HealthResponse, ModelInfoResponse, ReloadResponse
 from api_inference.settings import Settings, get_settings
+from api_inference.spool import DurableInferenceLog, InferenceLogSpool
 
 logger = logging.getLogger("api_inference")
 
@@ -69,6 +71,16 @@ async def _refresh_loop(service: ModelService, interval: float) -> None:
             logger.exception("model refresh loop error")
 
 
+async def _replay_loop(inference_log: DurableInferenceLog, interval: float) -> None:
+    """Replay spooled ``inference.logs`` rows at startup and then periodically."""
+    while True:
+        try:
+            await inference_log.replay()
+        except Exception:  # keep the loop alive on unexpected errors
+            logger.exception("inference log replay loop error")
+        await asyncio.sleep(interval)
+
+
 def create_app(
     settings: Settings | None = None,
     model_service: ModelService | None = None,
@@ -90,12 +102,33 @@ def create_app(
         max_size=settings.db_pool_max,
         connect_timeout_seconds=settings.db_connect_timeout_seconds,
     )
+    spool = (
+        InferenceLogSpool(Path(settings.inference_log_spool_path))
+        if settings.inference_log_spool_path
+        else None
+    )
+    inference_log = DurableInferenceLog(repo, spool)
+
+    async def _cancel(task: asyncio.Task[None] | None) -> None:
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await repo.open()
         refresh_task: asyncio.Task[None] | None = None
+        replay_task: asyncio.Task[None] | None = None
         try:
+            if spool is not None and settings.inference_log_replay_seconds > 0:
+                replay_task = asyncio.create_task(
+                    _replay_loop(inference_log, settings.inference_log_replay_seconds),
+                    name="inference-log-replay",
+                )
             await _initial_load(service, settings)
             if settings.model_refresh_seconds > 0:
                 refresh_task = asyncio.create_task(
@@ -104,20 +137,17 @@ def create_app(
                 )
             yield
         finally:
-            if refresh_task is not None:
-                refresh_task.cancel()
-                try:
-                    await refresh_task
-                except asyncio.CancelledError:
-                    pass
+            await _cancel(refresh_task)
+            await _cancel(replay_task)
             await repo.close()
 
     app = FastAPI(title="Diabetes Inference API", version=API_VERSION, lifespan=lifespan)
     app.state.settings = settings
     app.state.model_service = service
     app.state.repository = repo
-    app.include_router(build_router(service, repo))
-    app.add_exception_handler(RequestValidationError, build_validation_handler(repo))
+    app.state.inference_log = inference_log
+    app.include_router(build_router(service, repo, inference_log))
+    app.add_exception_handler(RequestValidationError, build_validation_handler(inference_log))
     app.add_middleware(MetricsMiddleware)
 
     @app.get("/health", response_model=HealthResponse, tags=["ops"])

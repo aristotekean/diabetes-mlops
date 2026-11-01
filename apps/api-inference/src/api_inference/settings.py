@@ -36,6 +36,14 @@ class Settings(BaseSettings):
     db_pool_max: int = Field(default=4, ge=1)
     db_connect_timeout_seconds: float = Field(default=5.0, gt=0)
 
+    # On-disk spool for ``inference.logs`` rows the database could not take.
+    # Relative paths resolve against the working directory (``/app`` in the
+    # image). An empty value disables the spool (rows are then only counted).
+    inference_log_spool_path: str = "spool/inference-logs.jsonl"
+    # Period of the background replay of spooled rows; ``0`` disables it (the
+    # spool still fills, ``replay`` is then only called explicitly).
+    inference_log_replay_seconds: float = Field(default=15, ge=0)
+
     log_level: str = "INFO"
 
     @property
