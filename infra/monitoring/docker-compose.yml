@@ -3,19 +3,22 @@
 #   S8 Prometheus  --->  scrapes api-inference:8000/metrics
 #   S9 Grafana     --->  queries Prometheus, serves the dashboard
 #
-# Included by the root docker-compose.yml, so a plain `docker compose up`
-# brings monitoring up alongside the API. Paths are relative to this file.
+# Included by the root docker-compose.yml under the `monitoring` profile, so a
+# plain `docker compose up` never starts it. Paths are relative to this file.
 #
 # Local, with the full stack (from the repository root):
-#   docker compose up -d --build
+#   docker compose --profile monitoring up -d --build
+# Monitoring only (naming a service enables its profile):
+#   docker compose up -d prometheus grafana
 #   Prometheus UI on http://localhost:9090
 #   Grafana     UI on http://localhost:3000   (admin / admin)
 #   The "Diabetes · Inference API" dashboard is provisioned automatically.
 #
 # On a dedicated Server C (the API stack lives on Server A): run this file on
 # its own and point Prometheus at Server A by editing the scrape target in
-# prometheus/prometheus.yml (see infra/monitoring/README.md):
-#   docker compose -f docker-compose.yml up -d
+# prometheus/prometheus.yml (see infra/monitoring/README.md). The profile is
+# required here too, otherwise compose starts nothing:
+#   docker compose -f docker-compose.yml --profile monitoring up -d
 #
 # Tunables (env or .env): PROMETHEUS_PORT, GRAFANA_PORT,
 # GRAFANA_ADMIN_USER, GRAFANA_ADMIN_PASSWORD, PROMETHEUS_RETENTION.
@@ -26,6 +29,7 @@ services:
   # ------------------------------------------------------------------------- #
   prometheus:
     image: prom/prometheus:v3.1.0
+    profiles: [ "monitoring" ]
     container_name: diabetes-prometheus
     command:
       - --config.file=/etc/prometheus/prometheus.yml
@@ -55,6 +59,7 @@ services:
   # ------------------------------------------------------------------------- #
   grafana:
     image: grafana/grafana:11.4.0
+    profiles: [ "monitoring" ]
     container_name: diabetes-grafana
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}

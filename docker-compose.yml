@@ -5,6 +5,7 @@
 #   S4 Inference API           <--->  S2 MLflow        (loads the registered model to serve)
 #   S5 postgres-train + S6 Airflow     see apps/airflow/compose.yml (included below)
 #   S7 Frontend                ---->  S4 Inference API (Streamlit UI)
+#   S8 Prometheus + S9 Grafana         see infra/monitoring/docker-compose.yml (`monitoring` profile)
 #
 # From the repository root:
 #   docker compose up -d --build     # build the project images on this host
@@ -23,6 +24,10 @@
 # Locust (Server B) is behind the `loadtest` profile, so it never starts by
 # default and does not compete with the API for CPU:
 #   docker compose --profile loadtest up -d     # see infra/load-testing
+# Prometheus + Grafana (Server C) are behind the `monitoring` profile:
+#   docker compose --profile monitoring up -d   # full stack + monitoring
+#   docker compose up -d prometheus grafana     # monitoring only (naming a
+#                                               # service enables its profile)
 #
 # The API serves the model registered in MLflow under the `production` alias.
 # Until a training DAG registers one, the API starts in `unavailable` state
@@ -35,6 +40,7 @@ name: diabetes
 include:
   - path: apps/airflow/compose.yml
   - path: infra/load-testing/docker-compose.yml
+  - path: infra/monitoring/docker-compose.yml
 
 x-mlflow-client-env: &mlflow-client-env
   MLFLOW_TRACKING_URI: http://mlflow:5000

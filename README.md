@@ -81,7 +81,7 @@ Los tres servidores se conectan por una red Tailscale. En OrbStack todo Server A
 | `postgres-train` (S5) | solo red interna | `app` / `app`, base `diabetes` | Esquemas `raw`, `clean` e `inference` (migraciones por el Job `train-db-migrate`) |
 | `airflow` (S6) | <http://airflow.k8s.orb.local> | `airflow` / `airflow` | api-server, scheduler, dag-processor y triggerer en un pod; metadatos en `airflow-db` |
 | `frontend` (S7) | <http://frontend.k8s.orb.local> | — | Formulario de 44 campos; solo habla con la API |
-| Prometheus (S8) · Grafana (S9) | <http://localhost:9090> · <http://localhost:3000> | Grafana `admin` / `admin` | `infra/monitoring`, compose independiente en Server C |
+| Prometheus (S8) · Grafana (S9) | <http://localhost:9090> · <http://localhost:3000> | Grafana `admin` / `admin` | `infra/monitoring`, perfil `monitoring` de compose (independiente en Server C) |
 | Locust (Server B) | <http://localhost:8089> | — | `infra/load-testing`, perfil `loadtest` de compose |
 
 ## Datos en PostgreSQL
@@ -132,7 +132,7 @@ El paquete compartido `ml/diabetes_model` implementa el contrato, las 37 variabl
 
 ```text
 .
-├── docker-compose.yml                # Stack completo en compose (incluye airflow y locust)
+├── docker-compose.yml                # Stack completo en compose (incluye airflow, locust y monitoring)
 ├── apps/
 │   ├── api-inference/                # S4 FastAPI: /predict, /health, /model-info, /model/reload, /metrics
 │   ├── frontend/                     # S7 Streamlit
@@ -175,8 +175,17 @@ python3 -m venv .venv && .venv/bin/pip install -e ./ml/diabetes_model pytest && 
 | Pausar el reentrenamiento | `kubectl -n diabetes exec deploy/airflow -c scheduler -- airflow dags pause diabetes_incremental_training` (en un portátil conviene tras la primera corrida) |
 | Prueba de carga | `LOCUST_HOST=http://api.k8s.orb.local docker compose --profile loadtest up -d` y abrir `localhost:8089`; `LOCUST_STEP_LOAD=1` busca el punto de degradación por escalones |
 | Observar el autoescalado | `kubectl -n diabetes get hpa api-inference -w` muestra CPU y réplicas en vivo; añade hasta 2 pods cada 30 s y quita 1 por minuto tras 2 minutos de calma |
-| Monitoreo | `cd infra/monitoring && docker compose up -d`; apuntar `prometheus/targets/api-targets.yml` a la API. Grafana abre en el dashboard **Diabetes · Inference API** |
+| Monitoreo | `docker compose up -d prometheus grafana` levanta solo Prometheus y Grafana (`--profile monitoring up -d` los suma al stack completo); apuntar `prometheus/targets/api-targets.yml` a la API. Grafana abre en el dashboard **Diabetes · Inference API** |
 | Borrar todo | `kubectl delete -k infra/k8s` (los PVC y sus datos se van con el namespace) |
+
+Locust y el monitoreo están detrás de los perfiles `loadtest` y `monitoring` del compose raíz, así que `docker compose up -d` no los arranca. Para el monitoreo:
+
+```bash
+docker compose up -d prometheus grafana        # solo Prometheus + Grafana (nombrar el servicio activa su perfil)
+docker compose --profile monitoring up -d      # stack completo + monitoreo
+```
+
+Prometheus en <http://localhost:9090> y Grafana en <http://localhost:3000> (`admin` / `admin`). Si se levanta desde `infra/monitoring` o `infra/load-testing` por separado (Server C o Server B), el `--profile` también es obligatorio: sin él compose no arranca ningún servicio.
 
 > Los Secrets llevan las credenciales de desarrollo de compose (`minioadmin`, `airflow`, `app`, `mlflow`). Son para un clúster local; cámbialas antes de exponerlo a otras máquinas.
 

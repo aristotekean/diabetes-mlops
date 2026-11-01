@@ -8,8 +8,9 @@
 #   UI on http://localhost:8089, target defaults to http://api-inference:8000
 #
 # On Server B, standalone (the API stack lives on Server A; this never starts it,
-# so the CPU spent simulating users does not compete with the API):
-#   LOCUST_HOST=http://<SERVER_A>:<PORT> docker compose -f docker-compose.yml up -d
+# so the CPU spent simulating users does not compete with the API). The profile
+# is required here too, otherwise compose starts nothing:
+#   LOCUST_HOST=http://<SERVER_A>:<PORT> docker compose -f docker-compose.yml --profile loadtest up -d
 #
 # Headless, same parameters for every run. The master coordinates the workers
 # (--expect-workers), so the traffic comes from LOCUST_WORKERS processes.

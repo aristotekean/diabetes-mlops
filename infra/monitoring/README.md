@@ -54,14 +54,23 @@ y tasa de error (KPI y en el tiempo).
 **MLOps** — predicciones por resultado; latencia de predicción p50/p95/p99;
 recargas de modelo; solicitudes en curso; fallos de log; tabla del modelo servido.
 
-## Uso local (independiente)
+## Uso local
 
-El monitoreo es un stack autónomo (Server C); se levanta por su cuenta desde
-esta carpeta, sin depender del resto:
+El compose raíz incluye este stack bajo el perfil `monitoring`, así que un
+`docker compose up` normal no lo arranca. Desde la raíz del repo:
+
+```bash
+docker compose up -d prometheus grafana        # solo monitoreo (nombrar el servicio activa su perfil)
+docker compose --profile monitoring up -d      # stack completo + monitoreo
+```
+
+También es un stack autónomo (Server C): se levanta por su cuenta desde esta
+carpeta, sin depender del resto. El perfil es obligatorio también aquí, sin él
+compose no arranca nada:
 
 ```bash
 cd infra/monitoring
-docker compose -f docker-compose.yml up -d
+docker compose -f docker-compose.yml --profile monitoring up -d
 ```
 
 | Servicio | URL | Credenciales |
@@ -79,8 +88,10 @@ Prometheus hace scrape del target definido en
 
 ### Conectar a la API (misma máquina)
 
-La API corre en el compose raíz (`name: diabetes` → red `diabetes_default`). Para
-que Prometheus la alcance **sin tocar el compose raíz**, el overlay
+Desde la raíz del repo no hay nada que conectar: `docker compose up -d prometheus grafana`
+ya comparte la red con la API. Si en cambio levantas el monitoreo desde esta
+carpeta, la API corre en el compose raíz (`name: diabetes` → red `diabetes_default`)
+y, para que Prometheus la alcance **sin tocar el compose raíz**, el overlay
 [`docker-compose.integration.yml`](docker-compose.integration.yml) une Prometheus
 a esa red:
 
@@ -90,7 +101,7 @@ docker compose up -d
 
 # 2) el monitoreo conectado a la red de la API
 cd infra/monitoring
-docker compose -f docker-compose.yml -f docker-compose.integration.yml up -d
+docker compose -f docker-compose.yml -f docker-compose.integration.yml --profile monitoring up -d
 ```
 
 Ahora el target `diabetes-api` pasa a **UP** y los paneles se llenan. `file_sd`
@@ -130,7 +141,7 @@ de Tailscale. Esta es la forma **instalando Tailscale en el host** de Server C
    > con `network_mode: host` para que use el MagicDNS del host.
 5. **Levantar el monitoreo** normal:
    ```bash
-   docker compose -f docker-compose.yml up -d
+   docker compose -f docker-compose.yml --profile monitoring up -d
    ```
 
 Así Server C alcanza la API de Server A **de forma privada por la tailnet**, sin
