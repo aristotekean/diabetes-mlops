@@ -1,383 +1,235 @@
-# diabetes-mlops
+# Diabetes MLOps · Kubernetes, Airflow y MLflow
 
-Plataforma MLOps de extremo a extremo para predecir el riesgo de diabetes. Cubre el ciclo completo: orquestación del entrenamiento, registro y versionado de modelos, servicio de inferencia, interfaz para el usuario final, monitoreo y pruebas de carga.
+**Grupo 6:** Kevin Bueno · Juan Camilo Martínez · Jorge Andrés Gil
+
+Plataforma MLOps de extremo a extremo para predecir el riesgo de readmisión hospitalaria en pacientes con diabetes (dataset Diabetes 130-US hospitals, clases `NO`, `>30` y `<30`). Airflow carga los datos por lotes en PostgreSQL, entrena tres candidatos y registra el mejor en MLflow con el alias `production`; los artefactos viven en MinIO, una API FastAPI sirve `models:/diabetes@production` en `POST /predict` y un frontend Streamlit lo consulta. Todo Server A corre en Kubernetes (OrbStack) con autoescalado de la API; Locust (Server B) genera carga y Prometheus + Grafana (Server C) la observan.
+
+## Ruta rápida
+
+1. Instalar en el clúster, una sola vez, el Ingress controller y metrics-server (OrbStack no trae ninguno; el HPA necesita el segundo):
+
+   ```bash
+   kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.15.1/deploy/static/provider/cloud/deploy.yaml
+   kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.9.1/components.yaml
+   ```
+
+2. Desplegar Server A completo (usa las imágenes publicadas en Docker Hub, no hace falta construir nada):
+
+   ```bash
+   kubectl apply -k infra/k8s
+   kubectl -n diabetes get pods        # esperar Running / Completed; el primer arranque tarda unos minutos
+   ```
+
+3. Activar el DAG `diabetes_incremental_training` en <http://airflow.k8s.orb.local> (`airflow` / `airflow`). Se crea pausado; al activarlo el scheduler lanza la primera corrida, que carga el primer lote, entrena y deja el modelo `diabetes` con el alias `production` en MLflow (alrededor de un minuto):
+
+   ```bash
+   kubectl -n diabetes exec deploy/airflow -c scheduler -- airflow dags unpause diabetes_incremental_training
+   ```
+
+4. Revisar los runs en <http://mlflow.k8s.orb.local> y la versión servida en <http://api.k8s.orb.local/model-info> (`"status": "ready"`; la API recarga el alias sola cada 60 s).
+5. Predecir desde el frontend <http://frontend.k8s.orb.local> (botón **Cargar ejemplo** y **Predecir**) o por API. El cuerpo lleva los 44 campos del contrato de [docs/data-contract.md](docs/data-contract.md):
+
+   ```bash
+   curl -s -X POST http://api.k8s.orb.local/predict -H 'Content-Type: application/json' -d @payload.json
+   ```
+
+   Respuesta esperada:
+
+   ```json
+   {
+     "request_id": "8a5dbc13-bb70-4301-bb2e-b6ed8021fa0b",
+     "prediction": "<30",
+     "probabilities": { "NO": 0.35, ">30": 0.23, "<30": 0.41 },
+     "model": { "name": "diabetes", "version": "2", "alias": "production" },
+     "processing_time_ms": 36.8
+   }
+   ```
+
+   La documentación interactiva está en <http://api.k8s.orb.local/docs>.
+
+> Mientras no exista un modelo con el alias `production`, `/predict` responde `503` y `/health` responde `200` con `model_loaded=false`. No hace falta reiniciar la API: consulta el registro cada `MODEL_REFRESH_SECONDS` y `POST /model/reload` fuerza la carga.
 
 ## Arquitectura
 
 ![Arquitectura de la plataforma](docs/images/1-arquitectura.png)
 
-La plataforma se despliega sobre tres servidores conectados por una red Tailscale:
+```mermaid
+flowchart LR
+    subgraph A["Server A · Kubernetes"]
+        s5[("S5 postgres-train<br/>raw · clean · inference")] -->|lotes| s6["S6 Airflow<br/>DAG incremental"]
+        s6 -->|runs y modelo| s2["S2 MLflow<br/>tracking + registry"]
+        s2 <-->|metadatos| s1[("S1 mlflow-db")]
+        s2 <-->|artefactos| s3[("S3 MinIO<br/>bucket mlflow")]
+        s4["S4 api-inference<br/>FastAPI + HPA"] -->|"models:/diabetes@production"| s2
+        s4 -->|inference.logs| s5
+        s7["S7 frontend<br/>Streamlit"] -->|/predict| s4
+        ing["Ingress nginx"] --> s4 & s7 & s2 & s6
+    end
+    b["Server B · Locust"] -->|carga| ing
+    s8["Server C · S8 Prometheus"] -->|/metrics| s4
+    s8 --> s9["S9 Grafana"]
+```
 
-| Servidor | Rol | Componentes |
-|----------|-----|-------------|
-| Server A | Clúster Kubernetes | S1 PostgreSQL (metadatos de MLflow), S2 MLflow (gestor de modelos), S3 MinIO (almacén de artefactos), S4 FastAPI (API de inferencia), S5 PostgreSQL (datos de entrenamiento), S6 Airflow (orquestador de entrenamiento), S7 Streamlit (frontend), Ingress controller |
-| Server B | Pruebas de carga | Locust |
-| Server C | Monitoreo | S8 Prometheus (métricas), S9 Grafana (dashboards) |
+Los tres servidores se conectan por una red Tailscale. En OrbStack todo Server A queda en el namespace `diabetes` y el Ingress resuelve los hosts `*.k8s.orb.local` desde el Mac.
 
-Flujo principal: Airflow toma los datos de entrenamiento desde PostgreSQL, entrena y registra el modelo en MLflow, que persiste los artefactos en MinIO. La API de inferencia carga el modelo desde MLflow y expone las predicciones al frontend de Streamlit a través del Ingress. Prometheus recolecta las métricas del clúster y Grafana las visualiza.
+| Servicio | URL | Credenciales | Rol |
+|----------|-----|--------------|-----|
+| `mlflow-db` (S1) | solo red interna | `mlflow` / `mlflow` | Backend store de MLflow |
+| `mlflow` (S2) | <http://mlflow.k8s.orb.local> | sin autenticación | Tracking server y Model Registry; sirve los artefactos por proxy hacia MinIO |
+| `minio` (S3) | consola `http://minio.diabetes.svc.cluster.local:9001` | `minioadmin` / `minioadmin` | Almacén de artefactos, bucket `mlflow` (lo crea el Job `minio-init`) |
+| `api-inference` (S4) | <http://api.k8s.orb.local> | sin autenticación | Sirve `models:/diabetes@production`; HPA de 1 a 20 pods al 70 % de CPU |
+| `postgres-train` (S5) | solo red interna | `app` / `app`, base `diabetes` | Esquemas `raw`, `clean` e `inference` (migraciones por el Job `train-db-migrate`) |
+| `airflow` (S6) | <http://airflow.k8s.orb.local> | `airflow` / `airflow` | api-server, scheduler, dag-processor y triggerer en un pod; metadatos en `airflow-db` |
+| `frontend` (S7) | <http://frontend.k8s.orb.local> | — | Formulario de 44 campos; solo habla con la API |
+| Prometheus (S8) · Grafana (S9) | <http://localhost:9090> · <http://localhost:3000> | Grafana `admin` / `admin` | `infra/monitoring`, compose independiente en Server C |
+| Locust (Server B) | <http://localhost:8089> | — | `infra/load-testing`, perfil `loadtest` de compose |
+
+## Datos en PostgreSQL
+
+`infra/database/migrations` crea tres esquemas en `postgres-train`. En Kubernetes los aplica el Job `train-db-migrate` (ConfigMap generado con `infra/k8s/scripts/render-migrations.sh`); en compose, el servicio del mismo nombre.
+
+| Esquema | Contenido |
+|---------|-----------|
+| `raw` | Filas tal como llegan del CSV, por lote, con checksum y estado `validated` / `rejected` y su motivo |
+| `clean` | Registros transformados por versión de transformación (`readmission-features-v2`), con partición `train` / `validation` / `test` por paciente |
+| `inference` | `inference.logs`: una fila por petición a `/predict`, incluidas las fallidas, con entrada, salida, modelo y tiempo |
+
+El dataset se descarga desde Google Drive al volumen persistente de Airflow en la primera corrida (`scripts/download_diabetes_dataset.py` hace lo mismo en local). El diseño de las tablas, las reglas de trazabilidad y el contrato de entrada y salida están en [docs/data-contract.md](docs/data-contract.md).
+
+## Entrenamiento y registro del modelo
+
+```mermaid
+sequenceDiagram
+    participant AF as Airflow
+    participant P as postgres-train
+    participant M as MLflow
+    participant S as MinIO
+    participant A as api-inference
+
+    AF->>P: ingest_next_batch (hasta 15.000 filas a raw.records)
+    AF->>P: validate_raw_quality · preprocess_raw_to_clean · split_dataset
+    AF->>AF: check_training_needed (omite si no hay datos nuevos)
+    AF->>M: train_candidates: 3 runs anidados (params, métricas, matrices de confusión)
+    M->>S: artefactos de cada run
+    AF->>M: register_best_model por macro-F1 de validación
+    AF->>M: compare_with_champion · promote_model (mueve el alias production solo si mejora)
+    A->>M: models:/diabetes@production (cada 60 s)
+    A->>P: inference.logs por cada /predict
+```
+
+El DAG `diabetes_incremental_training` simula la llegada incremental de datos: cada corrida carga un lote nuevo y reentrena con todo lo acumulado. Corre cada 10 minutos (`DIABETES_TRAINING_SCHEDULE`), sin catchup, con una sola ejecución activa y dos reintentos por tarea. Es reejecutable: los lotes tienen IDs deterministas, RAW es único por checksum y fila, y cada versión registrada lleva la huella del snapshot de CLEAN con el que se entrenó. Cargados los 7 lotes, las corridas siguientes no entrenan.
+
+El paquete compartido `ml/diabetes_model` implementa el contrato, las 37 variables, la partición y los candidatos una sola vez, y lo reutilizan el DAG y la API.
+
+| Qué se registra | Detalle |
+|-----------------|---------|
+| Candidatos | Regresión logística, gradient boosting y random forest, como runs anidados del experimento `diabetes-readmission` |
+| Métrica principal | Macro-F1 de validación: las clases están desbalanceadas (`<30` es el 11 %) y pondera las tres por igual |
+| Selección | Con el dataset completo gana gradient boosting (macro-F1 0,441 en validación y test) frente a 0,425 de la regresión logística |
+| Promoción | La versión nueva se evalúa contra la productiva sobre la misma validación; el alias `production` solo se mueve si mejora |
 
 ## Estructura del repositorio
 
+```text
+.
+├── docker-compose.yml                # Stack completo en compose (incluye airflow y locust)
+├── apps/
+│   ├── api-inference/                # S4 FastAPI: /predict, /health, /model-info, /model/reload, /metrics
+│   ├── frontend/                     # S7 Streamlit
+│   └── airflow/                      # S6 imagen y DAG diabetes_incremental_training
+├── ml/diabetes_model/                # Paquete compartido: contrato, features, splits, modelos
+├── infra/
+│   ├── database/migrations/          # Esquemas raw, clean e inference
+│   ├── k8s/                          # Manifiestos kustomize de Server A (S1–S7, Ingress, HPA)
+│   ├── load-testing/                 # Server B: Locust
+│   └── monitoring/                   # Server C: Prometheus y Grafana
+├── notebooks/01_eda.ipynb            # Análisis exploratorio que justifica el procesamiento
+├── scripts/publish_images.sh         # Publica las imágenes multi-arquitectura en Docker Hub
+└── docs/                             # data-contract.md y capturas de evidencia
 ```
-apps/            servicios propios: api-inference (FastAPI), frontend (Streamlit), airflow (DAGs)
-ml/              paquete python compartido con la lógica del modelo
-notebooks/       análisis exploratorio que justifica el procesamiento
-infra/database/  migraciones SQL de las capas RAW, CLEAN e INFERENCE
-infra/k8s/       manifiestos kustomize de Server A (ver "Despliegue en Kubernetes")
-infra/monitoring observabilidad con Prometheus y Grafana (Server C)
-infra/load-testing  pruebas de carga con Locust (Server B)
-```
 
-## Imágenes y ejecución en Mac o Linux
+## Ejecutar las pruebas
 
-Las imágenes propias (`diabetes-api-inference`, `diabetes-frontend` y
-`diabetes-airflow`) se publican en DockerHub para `linux/amd64` y `linux/arm64`
-bajo un mismo tag. Cada máquina descarga la variante de su procesador, así que
-las mismas imágenes corren nativas en un Mac con Apple Silicon y en un servidor,
-VM o nodo de Kubernetes Linux, sin emulación.
-
-Para construirlas y publicarlas (desde la raíz, con el árbol de Git limpio):
+Cada aplicación se prueba por separado con `uv`; ninguna necesita red, MLflow ni PostgreSQL.
 
 ```bash
-docker login                                   # con la cuenta de DOCKERHUB_USER
-scripts/publish_images.sh                      # construye ambas arquitecturas y publica
-scripts/publish_images.sh --check              # solo construye, sin publicar
-IMAGE_TAG=0.1.1 scripts/publish_images.sh api-inference   # un componente, otro tag
+cd apps/api-inference && uv sync && uv run pytest -q
+cd apps/frontend && uv sync && uv run pytest -q
+python3 -m venv .venv && .venv/bin/pip install -e ./ml/diabetes_model pytest && .venv/bin/python -m pytest ml/diabetes_model/tests
 ```
 
-El script usa un builder `docker-container` de buildx (lo crea si falta); la
-arquitectura ajena se compila emulada, por lo que esa parte tarda más. Publica un
-tag nuevo en cada cambio: los nodos guardan en caché la imagen de un tag ya
-descargado.
+| Suite | Qué verifica |
+|-------|--------------|
+| `apps/api-inference/tests` | `/health` y `/model-info` con y sin modelo, una predicción por petición, `422` ante campos faltantes o tipos incorrectos, `503` sin modelo y las métricas Prometheus |
+| `apps/frontend/tests` | El cliente HTTP de la API y la construcción de los 44 campos del formulario |
+| `ml/diabetes_model/tests` | El contrato de entrada, la ingeniería de características y los candidatos |
 
-Para levantar el stack en un **servidor o VM Linux**, copia `.env.example` a
-`.env` y ajusta:
-
-- `AIRFLOW_UID` con el resultado de `id -u`, para que Airflow pueda escribir
-  `apps/airflow/logs` y descargar el dataset en `data/Diabetes`.
-- `MLFLOW_ALLOWED_HOSTS` con la IP o el nombre del servidor (p. ej.
-  `192.168.1.50:*`) para abrir la UI de MLflow desde otra máquina; sin eso
-  responde 403.
-- `POSTGRES_TRAIN_PORT` u otros puertos si el host ya los usa.
-
-Luego `docker compose up -d` descarga las imágenes publicadas
-(`docker compose up -d --build` las construye en el propio servidor).
-
-## Despliegue en Kubernetes (OrbStack)
-
-`infra/k8s` despliega Server A completo (S1–S7 e Ingress) con kustomize sobre
-el Kubernetes integrado de OrbStack. Usa las mismas imágenes publicadas en
-Docker Hub (`aristotekean/diabetes-*:0.1.1`, el tag fijado en el bloque
-`images:` de `infra/k8s/kustomization.yaml`): no hace falta construir nada en
-local.
-
-### Requisitos
-
-| Requisito | Detalle |
-|-----------|---------|
-| OrbStack con Kubernetes habilitado | Settings → Kubernetes. Trae `kubectl` y la StorageClass `local-path`. |
-| Ingress controller | OrbStack no incluye ninguno. Instala ingress-nginx desde el manifiesto oficial (abajo). |
-| metrics-server | OrbStack tampoco lo incluye. Lo necesita el HPA de `api-inference` para leer la CPU de los pods (abajo). |
-| Salida a Internet desde el clúster | Docker Hub para las imágenes y Google Drive para el dataset. |
-
-Instalación del Ingress controller (una sola vez por clúster, versión fijada):
-
-```bash
-kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.15.1/deploy/static/provider/cloud/deploy.yaml
-kubectl -n ingress-nginx rollout status deploy/ingress-nginx-controller --timeout=180s
-```
-
-El Service `ingress-nginx-controller` es de tipo `LoadBalancer`; OrbStack le
-asigna una IP y resuelve cualquier `*.k8s.orb.local` hacia ella desde el Mac.
-
-Instalación de metrics-server (una sola vez por clúster, versión fijada). En
-OrbStack funciona tal cual, sin `--kubelet-insecure-tls`; en kind o minikube
-puede hacer falta añadir ese argumento al Deployment si el pod no pasa a Ready:
-
-```bash
-kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.9.1/components.yaml
-kubectl -n kube-system rollout status deploy/metrics-server --timeout=120s
-kubectl -n diabetes top pods            # tarda ~1 minuto en mostrar datos
-```
-
-### Despliegue
-
-```bash
-kubectl apply -k infra/k8s          # crea o actualiza todo
-kubectl -n diabetes get pods        # espera a ver Running y Completed
-kubectl -n diabetes get ingress     # el ADDRESS tarda unos segundos en aparecer
-```
-
-Todo queda en el namespace `diabetes`:
-
-| Recurso | Qué es |
-|---------|--------|
-| `mlflow-db`, `minio`, `mlflow` | S1 PostgreSQL de MLflow, S3 MinIO (bucket `mlflow`), S2 MLflow tracking server |
-| `postgres-train` | S5 PostgreSQL con los esquemas `raw`, `clean` e `inference` |
-| `api-inference`, `frontend` | S4 FastAPI y S7 Streamlit |
-| HPA `api-inference` | Escala la API de 1 a 20 pods cuando la CPU media supera el 70 % de su `requests` (250m). El resto de servicios queda en una réplica: montan PVC o no son el objetivo de las pruebas de carga. |
-| `airflow-db`, `airflow` | PostgreSQL de metadatos y S6 Airflow en un solo pod (api-server, scheduler, dag-processor, triggerer) |
-| Jobs `minio-init`, `train-db-migrate`, `airflow-init` | Crean el bucket, aplican las migraciones SQL y migran la base de Airflow (equivalen a los one-shot de compose) |
-| Ingress `diabetes` | Enrutamiento por host hacia los cuatro servicios HTTP |
-
-Los pods dependientes esperan con `initContainers` a que su base de datos y su
-Job estén listos, así que el primer arranque tarda unos minutos.
-
-### Acceso
-
-| URL | Servicio | Credenciales de desarrollo |
-|-----|----------|----------------------------|
-| http://frontend.k8s.orb.local | Streamlit | — |
-| http://api.k8s.orb.local | API de inferencia (`/docs`, `/health`, `/model-info`, `/predict`) | — |
-| http://mlflow.k8s.orb.local | MLflow UI | — |
-| http://airflow.k8s.orb.local | Airflow UI | `airflow` / `airflow` |
-
-Cualquier Service también responde desde el Mac por su nombre interno, p. ej.
-`http://mlflow.diabetes.svc.cluster.local:5000` o
-`http://minio.diabetes.svc.cluster.local:9001` (consola de MinIO,
-`minioadmin` / `minioadmin`).
-
-### Primer entrenamiento
-
-El DAG `diabetes_incremental_training` se crea **pausado**. Para obtener el
-primer modelo basta con activarlo: el scheduler lanza enseguida la corrida del
-intervalo anterior (sin catchup del resto). Si no quieres esperar, puedes
-además dispararlo a mano; ten en cuenta que cada corrida carga un lote nuevo.
-
-```bash
-kubectl -n diabetes exec deploy/airflow -c scheduler -- airflow dags unpause diabetes_incremental_training
-kubectl -n diabetes exec deploy/airflow -c scheduler -- airflow dags trigger diabetes_incremental_training   # opcional
-kubectl -n diabetes exec deploy/airflow -c scheduler -- airflow dags list-runs -d diabetes_incremental_training
-```
-
-La ejecución descarga el dataset al volumen persistente, carga el primer lote,
-entrena y registra `models:/diabetes@production` en MLflow (alrededor de un
-minuto por corrida con 15.000 filas por lote). La
-API recarga el modelo sola cada 60 s (`MODEL_REFRESH_SECONDS`); para forzarlo,
-`curl -X POST http://api.k8s.orb.local/model/reload`. Comprueba:
-
-```bash
-curl http://api.k8s.orb.local/model-info            # "status": "ready"
-curl -X POST http://api.k8s.orb.local/predict \
-  -H 'content-type: application/json' -d @payload.json   # ejemplo en apps/api-inference/README.md
-```
-
-Mientras el DAG esté activo, el scheduler lo ejecuta cada 10 minutos
-(`DIABETES_TRAINING_SCHEDULE`) y cada corrida carga un lote nuevo y reentrena.
-En un portátil conviene volver a pausarlo tras la primera corrida y
-reactivarlo solo cuando quieras seguir con la carga incremental:
-
-```bash
-kubectl -n diabetes exec deploy/airflow -c scheduler -- airflow dags pause diabetes_incremental_training
-```
-
-### Operación
+## Operación
 
 | Tarea | Cómo |
 |-------|------|
-| Cambiar una migración SQL | Edita `infra/database/migrations`, ejecuta `bash infra/k8s/scripts/render-migrations.sh` y commitea el ConfigMap generado. `--check` falla si está desactualizado (pensado para CI). |
-| Comprobar los manifiestos antes de commitear | `bash infra/k8s/scripts/check.sh`: construye el kustomize y verifica que el ConfigMap de migraciones esté al día (no hay CI en el repo; sirve como pre-commit). |
-| Redesplegar una versión nueva | Publica las imágenes con un tag nuevo, cambia `newTag` en `infra/k8s/kustomization.yaml` y vuelve a aplicar (pasos abajo). |
-| Reaplicar un Job | Los Jobs terminados se borran solos a los 10 minutos (`ttlSecondsAfterFinished`), así que un `kubectl apply -k infra/k8s` posterior los vuelve a crear y ejecutar (son idempotentes). Solo hace falta `kubectl -n diabetes delete job <nombre>` si quieres repetirlo dentro de esos 10 minutos, p. ej. para aplicar migraciones nuevas en el momento. |
-| Observar el autoescalado en una prueba de carga | `kubectl -n diabetes get hpa api-inference -w` muestra TARGETS (CPU actual/objetivo) y REPLICAS en vivo; `kubectl -n diabetes top pods` el consumo por pod. Un TARGETS `<unknown>` significa que metrics-server no está instalado o aún no reporta. Apunta Locust (`infra/load-testing`) a `http://api.k8s.orb.local`. El HPA añade hasta 2 pods cada 30 s al subir y quita 1 por minuto al bajar, tras 2 minutos de calma. Con 20 pods la API reserva 5 CPU y 10 Gi de memoria; si aparecen pods `Pending`, el nodo no tiene memoria libre para reservar (OrbStack: Settings → System). |
-| Borrar todo | `kubectl delete -k infra/k8s` (los PVC y sus datos se eliminan con el namespace). |
+| Levantar todo con compose en vez de Kubernetes | Copiar `.env.example` a `.env` y `docker compose up -d` (en Linux ajustar `AIRFLOW_UID` con `id -u`). MLflow en `localhost:5001`, API en `8000`, frontend en `8501`, Airflow en `8080` |
+| Publicar una versión nueva | `IMAGE_TAG=0.1.2 scripts/publish_images.sh` construye `amd64` y `arm64` y publica. Siempre un tag nuevo: el nodo reutiliza un tag ya descargado aunque el contenido cambie |
+| Redesplegar | Cambiar los tres `newTag` en `infra/k8s/kustomization.yaml`, `kubectl apply -k infra/k8s` y `kubectl -n diabetes rollout status deploy/api-inference deploy/frontend deploy/airflow`. Los PVC conservan modelo, bases y dataset |
+| Cambiar una migración SQL | Editar `infra/database/migrations`, correr `bash infra/k8s/scripts/render-migrations.sh` y commitear el ConfigMap. `bash infra/k8s/scripts/check.sh` valida los manifiestos antes de commitear |
+| Pausar el reentrenamiento | `kubectl -n diabetes exec deploy/airflow -c scheduler -- airflow dags pause diabetes_incremental_training` (en un portátil conviene tras la primera corrida) |
+| Prueba de carga | `LOCUST_HOST=http://api.k8s.orb.local docker compose --profile loadtest up -d` y abrir `localhost:8089`; `LOCUST_STEP_LOAD=1` busca el punto de degradación por escalones |
+| Observar el autoescalado | `kubectl -n diabetes get hpa api-inference -w` muestra CPU y réplicas en vivo; añade hasta 2 pods cada 30 s y quita 1 por minuto tras 2 minutos de calma |
+| Monitoreo | `cd infra/monitoring && docker compose up -d`; apuntar `prometheus/targets/api-targets.yml` a la API. Grafana abre en el dashboard **Diabetes · Inference API** |
+| Borrar todo | `kubectl delete -k infra/k8s` (los PVC y sus datos se van con el namespace) |
 
-> **Credenciales de desarrollo.** Los Secrets llevan los mismos valores por
-> defecto que compose (`minioadmin`, `airflow`, contraseñas `app`/`mlflow`).
-> Son para un clúster local; cámbialos antes de exponer el clúster a otras
-> máquinas.
+> Los Secrets llevan las credenciales de desarrollo de compose (`minioadmin`, `airflow`, `app`, `mlflow`). Son para un clúster local; cámbialas antes de exponerlo a otras máquinas.
 
-#### Redespliegue de una versión nueva
+## Solución de problemas
 
-Cada cambio de código se publica con un **tag nuevo**; nunca se reutiliza uno
-existente. Los manifiestos usan `imagePullPolicy: IfNotPresent`, y OrbStack
-comparte el almacén de imágenes con el Docker local: si un tag ya existe en la
-máquina (por ejemplo, un build local anterior), Kubernetes lo usa tal cual y no
-descarga el publicado en Docker Hub, aunque su contenido sea distinto.
-
-1. Publica las tres imágenes para amd64 y arm64 (requiere `docker login` y el
-   árbol de trabajo sin cambios pendientes):
-
-   ```bash
-   IMAGE_TAG=0.1.2 scripts/publish_images.sh                       # las tres
-   IMAGE_TAG=0.1.2 scripts/publish_images.sh frontend              # solo una
-   ```
-
-2. Apunta los manifiestos al tag nuevo: los tres `newTag` del bloque `images:`
-   en `infra/k8s/kustomization.yaml`. Mantén el mismo valor en los demás sitios
-   que fijan el tag por defecto: `IMAGE_TAG` en `.env.example`, los
-   `${IMAGE_TAG:-…}` de `docker-compose.yml` y `apps/airflow/compose.yml`, y el
-   valor por defecto de `IMAGE_TAG` en `scripts/publish_images.sh`.
-
-3. Aplica y espera a que los Deployments terminen de rotar:
-
-   ```bash
-   kubectl apply -k infra/k8s
-   kubectl -n diabetes rollout status deploy/frontend deploy/api-inference deploy/airflow --timeout=600s
-   ```
-
-   Los datos (modelo registrado, bases de datos, dataset) viven en los PVC y se
-   conservan. Si `apply` responde que `airflow-init` es inmutable, el Job aún no
-   venció su TTL: `kubectl -n diabetes delete job airflow-init` y vuelve a
-   aplicar.
-
-Para comprobar qué imagen corre cada pod y si coincide con Docker Hub:
-
-```bash
-kubectl -n diabetes get pods -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.containers[0].image}{"\n"}{end}'
-docker buildx imagetools inspect aristotekean/diabetes-frontend:0.1.2   # digest publicado
-```
-
-### En un servidor Linux
-
-- Los hosts `*.k8s.orb.local` solo existen en OrbStack. En
-  `infra/k8s/base/ingress/ingress.yaml` sustitúyelos por el nombre Tailscale
-  (o la IP) del nodo, uno por servicio o con prefijos de ruta.
-- Añade ese host a `MLFLOW_ALLOWED_HOSTS` en
-  `infra/k8s/base/mlflow/deployment.yaml` (p. ej. `mlflow.<nodo>.ts.net:*`) y
-  el origen completo a `MLFLOW_CORS_ALLOWED_ORIGINS` (p. ej.
-  `http://mlflow.<nodo>.ts.net`); sin lo primero MLflow responde 403 desde otra
-  máquina y sin lo segundo la UI carga pero no lista runs.
-- La opción "Expose services to local network devices" es exclusiva de OrbStack:
-  sin ella los LoadBalancer y NodePort solo se alcanzan desde el propio Mac. En
-  un servidor, expón el controller con el LoadBalancer de tu clúster o un
-  NodePort y apunta el DNS de Tailscale a él.
-
-## Dataset
-
-Descarga el dataset Diabetes 130-US hospitals indicado en el taller desde la raíz
-del repositorio:
-
-```bash
-python3 -m pip install -r scripts/requirements.txt
-python3 scripts/download_diabetes_dataset.py
-```
-
-El archivo se guarda en `data/Diabetes/Diabetes.csv`. El script valida que sea
-un CSV legible con las columnas `encounter_id` y `readmitted`, cuenta los
-registros y no vuelve a descargar un archivo válido que ya exista. Para
-reemplazarlo, ejecuta `python3 scripts/download_diabetes_dataset.py --force`.
-El dataset descargado está excluido de Git.
-
-El diseño de las tablas RAW, CLEAN e INFERENCE, las reglas de trazabilidad y
-el contrato de entrada/salida de inferencia están documentados en
-[docs/data-contract.md](docs/data-contract.md). La migración PostgreSQL inicial
-está en
-[infra/database/migrations/001_create_data_contract.sql](infra/database/migrations/001_create_data_contract.sql).
-
-## Análisis y procesamiento
-
-[notebooks/01_eda.ipynb](notebooks/01_eda.ipynb) contiene el análisis
-exploratorio que justifica la limpieza, la ingeniería de características
-(`readmission-features-v2`), la partición por paciente y la métrica de
-selección. Para ejecutarlo localmente:
-
-```bash
-python3 -m venv .venv
-.venv/bin/pip install -e ./ml/diabetes_model jupyter matplotlib
-.venv/bin/jupyter lab notebooks/01_eda.ipynb
-```
-
-El paquete compartido `ml/diabetes_model` implementa esas reglas una sola vez y
-lo reutilizan el DAG y la API:
-
-- `contract.py`: esquema de la fuente, validación por registro, exclusión de
-  fallecidos/hospicio y el contrato de 44 campos de entrada.
-- `features.py`: 37 variables del modelo (diagnósticos ICD-9 agrupados,
-  especialidad, edad ordinal, conteos de visitas y medicamentos, …).
-- `splits.py`: partición 70/15/15 por hash de paciente, estable entre lotes.
-- `models.py`: candidatos (regresión logística, gradient boosting, random
-  forest), métricas y el pipeline que se sirve.
-
-Para entrenar los candidatos sobre el CSV completo y ejecutar las pruebas:
-
-```bash
-.venv/bin/pip install -e ./ml/diabetes_model pytest
-.venv/bin/python -m diabetes_model data/Diabetes/Diabetes.csv
-.venv/bin/python -m pytest ml/diabetes_model/tests
-```
-
-La métrica principal es el **macro-F1 de validación**: las clases están
-desbalanceadas (`<30` es el 11%) y el macro-F1 pondera por igual las tres. Con
-el dataset completo el mejor candidato es gradient boosting (macro-F1 de
-validación 0,441, test 0,441), frente a 0,425 de la regresión logística v1.
-
-## DAG de entrenamiento
-
-El DAG `diabetes_incremental_training` simula la llegada incremental de datos:
-**cada ejecución carga un lote nuevo** (máximo 15.000 filas) y reentrena con
-todo lo acumulado. Tareas:
-
-1. `validate_source_file`: descarga el CSV si falta y valida esquema y forma.
-2. `ingest_next_batch`: carga a `raw.records` el siguiente lote pendiente.
-3. `validate_raw_quality`: marca cada fila `validated`/`rejected` con su motivo;
-   falla si un lote supera 1% de rechazos.
-4. `preprocess_raw_to_clean`: lee RAW (no el CSV), aplica la transformación y
-   deja el resultado en `clean.records_staging`.
-5. `store_clean_records`: fusiona staging en `clean.records` de forma atómica.
-6. `split_dataset`: asigna train/validation/test por paciente y verifica que
-   no haya fuga entre particiones.
-7. `check_training_needed`: omite el entrenamiento si no hay datos nuevos.
-8. `train_candidates`: entrena los 3 candidatos como runs anidados de MLflow
-   (parámetros, métricas, matrices de confusión, reportes y modelo).
-9. `register_best_model`: registra el mejor por macro-F1 de validación.
-10. `compare_with_champion`: evalúa la nueva versión y la versión productiva
-    sobre la misma validación, cargándolas desde el registro.
-11. `promote_model`: mueve el alias `production` solo si la nueva versión es
-    mejor.
-
-Por defecto se ejecuta cada 10 minutos (`DIABETES_TRAINING_SCHEDULE`), sin
-catchup y con una sola ejecución activa; las tareas se reintentan dos veces.
-Es reejecutable: los lotes tienen IDs deterministas, RAW es único por
-checksum y fila, CLEAN por registro y versión de transformación, y cada
-versión registrada lleva la huella del snapshot de CLEAN con el que se
-entrenó. Una vez cargados los 7 lotes, las ejecuciones siguientes no
-entrenan.
-
-Compose aplica las migraciones de `infra/database/migrations` con el servicio
-`train-db-migrate` antes de iniciar Airflow. La conexión a PostgreSQL se
-configura con `TRAIN_DB_*` o `TRAIN_DATABASE_URL`, y MLflow con
-`MLFLOW_TRACKING_URI`. En Kubernetes, monta un volumen persistente escribible
-en `DIABETES_DATASET_PATH` y permite salida HTTPS a Google Drive. El detalle de
-tablas, reglas y contrato de inferencia está en
-[docs/data-contract.md](docs/data-contract.md).
-
-Si ya habías ejecutado la versión anterior del DAG, los datos en
-`postgres-train` y el modelo `diabetes` corresponden a la carga completa v1.
-Para repetir la carga incremental desde cero, elimina los volúmenes de datos:
-`docker compose down && docker volume rm diabetes_postgres_train diabetes_mlflow_db diabetes_minio`.
+- `/predict` responde `503`: todavía no hay un modelo con el alias `production` o MLflow no es alcanzable. Activa el DAG y espera la primera corrida; `curl http://api.k8s.orb.local/model-info` muestra el último error.
+- La API sigue sirviendo una versión vieja tras promover otra: el refresco es cada 60 s; `curl -X POST http://api.k8s.orb.local/model/reload` la fuerza.
+- El HPA muestra `TARGETS <unknown>`: metrics-server no está instalado o aún no reporta (tarda alrededor de un minuto). Pods `Pending` al escalar: el nodo no tiene memoria libre que reservar (OrbStack: Settings → System).
+- El pod corre una imagen distinta a la de Docker Hub: el tag ya existía en la máquina (`imagePullPolicy: IfNotPresent` y OrbStack comparte el almacén con Docker). Publica con un tag nuevo.
+- `kubectl apply` dice que `airflow-init` es inmutable: el Job aún no venció su TTL de 10 minutos. `kubectl -n diabetes delete job airflow-init` y vuelve a aplicar.
+- MLflow responde `403` o la UI carga sin runs desde otra máquina: añade el host a `MLFLOW_ALLOWED_HOSTS` y el origen a `MLFLOW_CORS_ALLOWED_ORIGINS` en `infra/k8s/base/mlflow/deployment.yaml`.
+- Los hosts `*.k8s.orb.local` solo existen en OrbStack. En un servidor Linux sustitúyelos en `infra/k8s/base/ingress/ingress.yaml` por el nombre Tailscale del nodo y expón el controller con el LoadBalancer o NodePort del clúster.
 
 ## Evidencias
 
-Capturas del despliegue en funcionamiento. La arquitectura general está al
-inicio de este documento.
+### 1. Imágenes publicadas en Docker Hub
 
-### Imágenes publicadas en Docker Hub
+Los tres repositorios públicos del namespace `aristotekean`: `diabetes-airflow`, `diabetes-frontend` y `diabetes-api-inference`, cada uno con el manifiesto multi-arquitectura (`linux/amd64` y `linux/arm64`) que consumen compose y Kubernetes.
 
 ![Imágenes en Docker Hub](docs/images/2-docker-hub-images.png)
 
-### Clúster de Kubernetes
+### 2. Clúster de Kubernetes
+
+OrbStack con el namespace `diabetes` en ejecución: los pods de `airflow`, `airflow-db`, `api-inference`, `frontend`, `minio`, `mlflow`, `mlflow-db` y `postgres-train`, más `ingress-nginx-controller`. El detalle del pod de Airflow muestra los `initContainers` `wait-for-airflow-db` y `wait-for-migrations` y los cuatro contenedores (api-server, dag-processor, scheduler y triggerer). La salida de `kubectl get svc -A` y `kubectl get ingress -A` muestra los Services del namespace, el LoadBalancer del Ingress controller y el Ingress `diabetes` con los hosts `frontend`, `api`, `mlflow` y `airflow` en `k8s.orb.local`.
 
 ![Clúster de Kubernetes](docs/images/3-kubernetes-cluster.png)
 
 ![Pods en ejecución](docs/images/3-1-kubernetes-pods.png)
 
-![Controladores del clúster](docs/images/3-2-kubernetes-ctrl.png)
+![Services e Ingress del clúster](docs/images/3-2-kubernetes-ctrl.png)
 
-### Airflow
+### 3. DAG de entrenamiento en Airflow
+
+Corrida programada de `diabetes_incremental_training` con las once tareas en orden, de `validate_source_file` a `promote_model`. `train_candidates` tarda 31 s con el lote cargado; las demás, entre uno y tres segundos.
 
 ![DAG de entrenamiento en Airflow](docs/images/4-airflow.png)
 
-### API de inferencia
+### 4. API de inferencia
+
+Documentación interactiva de la Diabetes Inference API en `api.k8s.orb.local/docs`, con los endpoints `POST /predict`, `GET /health`, `GET /model-info` y `POST /model/reload`.
 
 ![API de inferencia](docs/images/5-api-inference.png)
 
-### Frontend
+### 5. Frontend
+
+Streamlit en `frontend.k8s.orb.local`: la barra lateral confirma la API disponible y el modelo productivo `diabetes` versión 2 con el alias `production`; el formulario carga un encuentro de ejemplo del dataset. Tras **Predecir**, la respuesta es `<30` (readmisión en menos de 30 días), con las probabilidades por clase, el modelo `diabetes v2`, 36,8 ms de procesamiento y el `request_id` registrado en `inference.logs`.
 
 ![Frontend](docs/images/6-frontend.png)
 
 ![Predicción desde el frontend](docs/images/6-1-frontend-prediction.png)
 
-### MLflow
+### 6. Experimentos en MLflow
+
+MLflow 3.16.1 en `mlflow.k8s.orb.local`, experimento `diabetes-readmission` con los runs padre de cada corrida del DAG (`training-scheduled__…` y `training-manual__…`), con origen `airflow`; dentro de cada uno están los tres candidatos anidados.
 
 ![Experimentos en MLflow](docs/images/7-mlflow-experiments.png)
