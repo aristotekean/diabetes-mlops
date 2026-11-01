@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -78,6 +79,7 @@ def build_router(
     @router.post(PREDICT_PATH, response_model=PredictResponse)
     async def predict(payload: PredictRequest, request: Request) -> Any:
         request_id = payload.request_id or uuid4()
+        requested_at = datetime.now(UTC)
         # The exact submitted object is what the audit log stores; the
         # validated copy (same keys) is what the model receives.
         raw_body = await request.json()
@@ -94,6 +96,7 @@ def build_router(
                     request_id=request_id,
                     input_data=submitted,
                     status="failed",
+                    requested_at=requested_at,
                     model_name=service.name,
                     model_alias=service.alias,
                     error_code="model_unavailable",
@@ -113,6 +116,7 @@ def build_router(
                     request_id=request_id,
                     input_data=submitted,
                     status="failed",
+                    requested_at=requested_at,
                     model_name=loaded.name if loaded else service.name,
                     model_version=loaded.version if loaded else None,
                     model_alias=loaded.alias if loaded else service.alias,
@@ -135,6 +139,7 @@ def build_router(
             request_id=request_id,
             input_data=submitted,
             status="succeeded",
+            requested_at=requested_at,
             prediction=result.prediction,
             probabilities=result.probabilities,
             model_name=result.model.name,
@@ -211,6 +216,7 @@ def build_validation_handler(inference_log: DurableInferenceLog):
                     request_id=request_id,
                     input_data=input_data_from_body(exc.body),
                     status="failed",
+                    requested_at=datetime.now(UTC),
                     error_code="validation_error",
                     error_message=message[:_MAX_ERROR_MESSAGE],
                 ),

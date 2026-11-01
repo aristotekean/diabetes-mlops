@@ -11,7 +11,7 @@ import psycopg
 
 from conftest import InMemoryRepository, make_app, valid_features
 from api_inference.repository import InferenceLogRecord
-from api_inference.spool import DurableInferenceLog, InferenceLogSpool
+from api_inference.spool import DurableInferenceLog, InferenceLogSpool, encode_record
 from test_metrics import sample_value, scrape
 
 
@@ -127,6 +127,78 @@ async def test_spool_survives_a_restart(tmp_path: Path):
     assert repository.rows == [record]
 
 
+async def test_cancelled_replay_keeps_every_unconfirmed_row(tmp_path: Path):
+    """A shutdown in the middle of a replay (SIGTERM during an outage) loses nothing."""
+
+    class SlowRepository(InMemoryRepository):
+        async def log(self, record: InferenceLogRecord) -> None:
+            await asyncio.sleep(10)  # a hanging connection attempt
+
+    spool = InferenceLogSpool(tmp_path / "spool.jsonl")
+    durable = DurableInferenceLog(InMemoryRepository(fail_log=True), spool)
+    records = [_record() for _ in range(3)]
+    for record in records:
+        await durable.write(record)
+
+    task = asyncio.create_task(DurableInferenceLog(SlowRepository(), spool).replay())
+    await asyncio.sleep(0.05)  # inside the first insert
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    assert spool.pending() == 3
+    assert spool.read_all() == records
+    repository = InMemoryRepository()
+    assert await DurableInferenceLog(repository, spool).replay() == 3
+    assert repository.rows == records
+
+
+async def test_rows_appended_during_a_replay_are_kept_after_it(tmp_path: Path):
+    spool = InferenceLogSpool(tmp_path / "spool.jsonl")
+    durable = DurableInferenceLog(InMemoryRepository(fail_log=True), spool)
+    older = _record()
+    await durable.write(older)
+    newer = _record()
+
+    class AppendingRepository(InMemoryRepository):
+        async def log(self, record: InferenceLogRecord) -> None:
+            if not self.rows:
+                await durable.write(newer)  # a request arrives mid-replay
+            raise RuntimeError("still down")
+
+    await DurableInferenceLog(AppendingRepository(), spool).replay()
+
+    assert spool.read_all() == [older, newer]
+    assert not spool.in_flight_path.exists()
+
+
+async def test_batch_left_in_flight_by_a_crash_is_replayed_first(tmp_path: Path):
+    spool = InferenceLogSpool(tmp_path / "spool.jsonl")
+    crashed, fresh = _record(), _record()
+    spool.in_flight_path.write_text(encode_record(crashed) + "\n", encoding="utf-8")
+    spool.append(fresh)
+    assert spool.pending() == 2
+
+    repository = InMemoryRepository()
+    assert await DurableInferenceLog(repository, spool).replay() == 2
+
+    assert repository.rows == [crashed, fresh]
+    assert not spool.in_flight_path.exists()
+    assert not spool.path.exists()
+
+
+def test_requested_at_survives_the_spool_round_trip(tmp_path: Path):
+    from datetime import UTC, datetime
+
+    from api_inference.spool import decode_record
+
+    record = _record(requested_at=datetime(2026, 11, 1, 22, 30, 15, 123456, tzinfo=UTC))
+
+    assert decode_record(encode_record(record)) == record
+
+
 async def test_corrupt_spool_line_is_skipped_with_the_rest_replayed(tmp_path: Path):
     path = tmp_path / "spool.jsonl"
     record = _record()
@@ -194,6 +266,7 @@ async def test_predict_spools_row_when_database_is_down_and_replays_later(
     assert row.input_data == features
     assert row.prediction == "NO"
     assert (row.model_name, row.model_version) == ("diabetes", "3")
+    assert row.requested_at is not None and row.requested_at.tzinfo is not None
     final = await scrape(client)
     assert sample_value(final, "inference_log_spool_pending", {}) == 0
     assert sample_value(final, "inference_log_replayed_total", {}) >= 1

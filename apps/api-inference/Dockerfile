@@ -45,7 +45,11 @@ WORKDIR /app
 COPY --from=deps /app/.venv /app/.venv
 COPY apps/api-inference/src/ /app/src/
 
-RUN chown -R 1000:1000 /app
+# Mount point of the inference.logs spool (INFERENCE_LOG_SPOOL_PATH defaults
+# to spool/inference-logs.jsonl under /app). It must exist in the image, owned
+# by the runtime user: a named volume mounted on a missing path is created
+# root-owned and the API could not write to it.
+RUN mkdir -p /app/spool && chown -R 1000:1000 /app
 
 USER app
 EXPOSE 8000

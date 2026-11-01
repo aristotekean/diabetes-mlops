@@ -140,7 +140,11 @@ devuelve igual aunque falle. Lo que cambia es qué pasa con la fila:
   (también al arrancar, así se recuperan las filas de un proceso anterior),
   reinsertando en el orden original y deteniéndose en el primer fallo
   transitorio sin perder el resto. `inference_log_spool_pending` expone la
-  cola.
+  cola. El replay mueve el lote a `<spool>.replaying` y solo lo borra al
+  terminar, así un apagado o caída del proceso a mitad de camino no pierde
+  filas (las que ya habían entrado vuelven como `request_id` duplicado y se
+  descartan). Cada fila lleva su `requested_at` original, no la hora del
+  replay.
 - **Fallo permanente** (`IntegrityError`/`DataError` de psycopg, p. ej.
   `request_id` duplicado o una fila ya insertada antes de perder la conexión):
   reintentar no sirve, la fila se descarta y cuenta en

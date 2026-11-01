@@ -36,6 +36,7 @@ async def test_predict_success_returns_contract_and_logs_row(running_client):
     assert (row.model_name, row.model_version, row.model_alias) == ("diabetes", "3", "production")
     assert row.processing_time_ms == body["processing_time_ms"]
     assert row.error_code is None
+    assert row.requested_at is not None and row.requested_at.tzinfo is not None
 
 
 async def test_predict_generates_request_id_when_omitted(running_client):

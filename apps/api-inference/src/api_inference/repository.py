@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Protocol
 from uuid import UUID
 
@@ -21,6 +22,9 @@ class InferenceLogRecord:
     request_id: UUID
     input_data: dict[str, Any]
     status: str  # "succeeded" | "failed"
+    # Request time captured by the API; a row replayed from the spool after an
+    # outage must keep it instead of taking the column default (insert time).
+    requested_at: datetime | None = None
     prediction: str | None = None
     probabilities: dict[str, float] | None = None
     model_name: str | None = None
@@ -67,11 +71,12 @@ class InferenceLogRepository(Protocol):
 
 _INSERT = """
 INSERT INTO inference.logs (
-    request_id, input_data, prediction, probabilities,
+    request_id, requested_at, input_data, prediction, probabilities,
     model_name, model_version, model_alias, processing_time_ms,
     status, error_code, error_message
 ) VALUES (
-    %(request_id)s, %(input_data)s, %(prediction)s, %(probabilities)s,
+    %(request_id)s, COALESCE(%(requested_at)s, CURRENT_TIMESTAMP),
+    %(input_data)s, %(prediction)s, %(probabilities)s,
     %(model_name)s, %(model_version)s, %(model_alias)s, %(processing_time_ms)s,
     %(status)s, %(error_code)s, %(error_message)s
 )
@@ -145,6 +150,7 @@ class PostgresInferenceLogRepository:
     async def log(self, record: InferenceLogRecord) -> None:
         params = {
             "request_id": record.request_id,
+            "requested_at": record.requested_at,
             "input_data": Jsonb(record.input_data),
             # ``prediction`` is a JSONB column: store the label as a JSON string.
             "prediction": Jsonb(record.prediction) if record.prediction is not None else None,
