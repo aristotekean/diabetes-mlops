@@ -58,3 +58,11 @@ spec:
             # MLFLOW_ARTIFACTS_BUCKET, from .env.
             - configMapRef:
                 name: mlflow-server-env
+          # mc only: small, bounded.
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi

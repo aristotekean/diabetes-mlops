@@ -78,6 +78,15 @@ spec:
                 secretKeyRef:
                   name: postgres-train-credentials
                   key: POSTGRES_PASSWORD
+          # Shell loop around pg_isready: negligible footprint, bounded so a stuck
+          # wait cannot grow.
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
       containers:
         - name: migrate
           image: postgres:16
@@ -110,6 +119,14 @@ spec:
             - name: migrations
               mountPath: /database
               readOnly: true
+          # psql applying a handful of SQL files; the migrations are small.
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
       volumes:
         - name: migrations
           configMap:

@@ -1,14 +1,19 @@
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: mlflow-db
   labels:
     app.kubernetes.io/name: mlflow-db
 spec:
   replicas: 1
-  # A single Postgres instance owns the volume: never run two pods at once.
-  strategy:
-    type: Recreate
+  # A single Postgres instance owns the volume: a StatefulSet
+  # gives the pod a stable identity (mlflow-db-0), its own PVC from
+  # volumeClaimTemplates below (kept across restarts and deletes) and an
+  # update that terminates the old pod before creating the new one, so two
+  # instances never write the same volume. The headless Service names
+  # the pod as mlflow-db-0.mlflow-db-headless; clients keep using
+  # `mlflow-db`.
+  serviceName: mlflow-db-headless
   selector:
     matchLabels:
       app.kubernetes.io/name: mlflow-db
@@ -23,18 +28,25 @@ spec:
           envFrom:
             - secretRef:
                 name: mlflow-db-credentials
-          env:
-            # initdb refuses a non-empty directory; some provisioners drop a
-            # `lost+found` at the mount root, so the cluster lives one level
-            # below the mount point.
-            - name: PGDATA
-              value: /var/lib/postgresql/data/pgdata
+            # Non-sensitive settings (PGDATA), from the ConfigMap in
+            # kustomization.yaml.
+            - configMapRef:
+                name: mlflow-db-env
           ports:
             - name: postgres
               containerPort: 5432
           volumeMounts:
             - name: data
               mountPath: /var/lib/postgresql/data
+          # Sized for this stack's load (single app, small datasets); raise the
+          # limits if a training run or a migration gets OOMKilled.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
           # POSTGRES_USER / POSTGRES_DB come from the Secret through envFrom.
           # The kubelet expands $(VAR) in exec probes only from env entries
           # with a literal `value`, so the probes go through `sh -c` and let
@@ -58,7 +70,15 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 5
-      volumes:
-        - name: data
-          persistentVolumeClaim:
-            claimName: mlflow-db-data
+  # One PVC per pod, named data-mlflow-db-0; no storageClassName: the
+  # cluster default is used (OrbStack: `local-path`, bound when the pod is
+  # scheduled). The PVC outlives the pod and the StatefulSet.
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 2Gi

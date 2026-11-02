@@ -52,6 +52,15 @@ spec:
                 secretKeyRef:
                   name: mlflow-db-credentials
                   key: POSTGRES_DB
+          # Shell loop around pg_isready: negligible footprint, bounded so a stuck
+          # wait cannot grow.
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
         - name: wait-for-minio-bucket
           image: cgr.dev/chainguard/minio:latest
           command: ["/bin/sh", "-c"]
@@ -81,6 +90,14 @@ spec:
           securityContext:
             runAsUser: 65532
             runAsGroup: 65532
+          # mc only: small, bounded.
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
       containers:
         - name: mlflow
           image: ghcr.io/mlflow/mlflow:v3.16.1
@@ -152,6 +169,15 @@ spec:
           ports:
             - name: http
               containerPort: 5000
+          # The pip install at start and the UI's run searches are the peaks;
+          # the server idles well under the requests.
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: 1
+              memory: 1Gi
           # Up to 150 s for the pip install plus MLflow's own boot; liveness
           # and readiness only start once this has passed.
           startupProbe:

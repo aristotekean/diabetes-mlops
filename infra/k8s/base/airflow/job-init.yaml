@@ -85,6 +85,15 @@ spec:
           securityContext:
             runAsUser: 999
             runAsGroup: 999
+          # Shell loop around pg_isready: negligible footprint, bounded so a stuck
+          # wait cannot grow.
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
       containers:
         - name: init
           image: aristotekean/diabetes-airflow
