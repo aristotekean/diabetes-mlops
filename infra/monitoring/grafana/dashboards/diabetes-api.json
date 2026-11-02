@@ -26,7 +26,7 @@
   "timezone": "browser",
   "title": "Diabetes · Inference API",
   "uid": "diabetes-api",
-  "version": 2,
+  "version": 3,
   "panels": [
     {
       "id": 100,
@@ -40,12 +40,12 @@
       "id": 1,
       "type": "stat",
       "title": "Solicitudes totales",
-      "description": "Número total de solicitudes atendidas por la API.",
+      "description": "Solicitudes reales atendidas por la API (excluye los health checks de /health; /metrics tampoco se contabiliza).",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 },
       "targets": [
         { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum(http_requests_total) or vector(0)" }
+          "expr": "sum(http_requests_total{path!=\"/health\"}) or vector(0)" }
       ],
       "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto",
         "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
@@ -272,7 +272,7 @@
       "title": "Recargas de modelo",
       "description": "rate(model_reloads_total) por resultado (success / failure).",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 8, "w": 6, "x": 0, "y": 39 },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 39 },
       "targets": [
         { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "legendFormat": "{{result}}",
           "expr": "sum by (result) (rate(model_reloads_total[5m]))" }
@@ -286,7 +286,7 @@
       "title": "Solicitudes en curso",
       "description": "http_requests_in_progress — solicitudes atendidas en este instante.",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 8, "w": 6, "x": 6, "y": 39 },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 39 },
       "targets": [
         { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "legendFormat": "en curso",
           "expr": "sum(http_requests_in_progress)" }
@@ -300,7 +300,7 @@
       "title": "Fallos de log de inferencia",
       "description": "inference_log_failures_total — filas de inference.logs que no se pudieron escribir.",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 8, "w": 4, "x": 12, "y": 39 },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 39 },
       "targets": [
         { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "sum(inference_log_failures_total) or vector(0)" }
@@ -310,27 +310,6 @@
       "fieldConfig": { "defaults": { "unit": "short", "decimals": 0, "color": { "mode": "thresholds" },
         "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] } }, "overrides": [] }
     },
-    {
-      "id": 18,
-      "type": "table",
-      "title": "Modelo servido",
-      "description": "model_info — nombre, versión y alias del modelo productivo actual.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 39 },
-      "targets": [
-        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "model_info", "format": "table", "instant": true }
-      ],
-      "options": { "showHeader": true },
-      "fieldConfig": { "defaults": {}, "overrides": [] },
-      "transformations": [
-        { "id": "organize", "options": {
-          "excludeByName": { "Time": true, "__name__": true, "job": true, "instance": true, "Value": true },
-          "renameByName": { "name": "Modelo", "version": "Versión", "alias": "Alias" }
-        } }
-      ]
-    },
-
     { "id": 103, "type": "row", "title": "MinIO · almacén de artefactos (S3)", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 47 }, "collapsed": false, "panels": [] },
 
     {
