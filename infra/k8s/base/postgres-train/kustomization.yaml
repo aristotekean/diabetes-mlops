@@ -4,11 +4,13 @@
 #
 # migrations-configmap.yaml is GENERATED from infra/database by
 # infra/k8s/scripts/render-migrations.sh; never edit it by hand.
+#
+# Credentials: Secret `postgres-train-credentials`, rendered from TRAIN_DB_*
+# in .env by infra/k8s/scripts/render-env.sh.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 resources:
-  - secret.yaml
   - pvc.yaml
   - deployment.yaml
   - service.yaml

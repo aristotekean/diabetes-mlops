@@ -9,8 +9,8 @@
 # into the `airflow-env` ConfigMap, the `airflow-secrets` Secret, the shared
 # MLflow client settings and the training database password.
 #
-# The image is referenced by name only: its tag is set once in the root
-# kustomization (`images:`).
+# The image is referenced by name only: infra/k8s/generated sets
+# DOCKERHUB_USER/IMAGE_TAG from .env, like every ConfigMap and Secret above.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

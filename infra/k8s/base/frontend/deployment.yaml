@@ -1,6 +1,6 @@
 # Mirror of the `frontend` service in docker-compose.yml. The image is
-# referenced by name only: its tag is set once in the root kustomization
-# (`images:`). No init wait: the UI shows the API as unreachable until
+# referenced by name only: infra/k8s/generated sets DOCKERHUB_USER/IMAGE_TAG
+# from .env. No init wait: the UI shows the API as unreachable until
 # api-inference answers, which is the honest state during a rollout.
 apiVersion: apps/v1
 kind: Deployment
@@ -22,9 +22,10 @@ spec:
         - name: streamlit
           image: aristotekean/diabetes-frontend
           imagePullPolicy: IfNotPresent
-          env:
-            - name: API_URL
-              value: http://api-inference:8000
+          # API_URL, from .env (infra/k8s/generated).
+          envFrom:
+            - configMapRef:
+                name: frontend-env
           ports:
             - name: http
               containerPort: 8501

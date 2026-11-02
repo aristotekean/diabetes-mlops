@@ -14,8 +14,9 @@
 # mounted and the image already owns /opt/airflow, so it runs as the airflow
 # user (uid 50000, gid 0). Re-running is safe.
 #
-# A Job's pod template is immutable once created, and the root `images:` block
-# rewrites this image tag. Finished Jobs are garbage-collected after
+# A Job's pod template is immutable once created, and infra/k8s/generated
+# (rendered from .env) rewrites this image tag and the hashed names of the
+# ConfigMaps and Secrets it uses. Finished Jobs are garbage-collected after
 # ttlSecondsAfterFinished, so a later `kubectl apply -k infra/k8s` recreates
 # (and re-runs) the Job instead of failing with "field is immutable"; within
 # that window, delete it by hand before applying.

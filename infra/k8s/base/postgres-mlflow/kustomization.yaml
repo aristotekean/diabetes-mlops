@@ -1,10 +1,12 @@
 # S1 · PostgreSQL backend store for MLflow. Reached as `mlflow-db` (same
 # hostname as in docker-compose.yml); internal to the stack, own volume.
+#
+# Credentials: Secret `mlflow-db-credentials`, rendered from MLFLOW_DB_* in
+# .env by infra/k8s/scripts/render-env.sh.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 resources:
-  - secret.yaml
   - pvc.yaml
   - deployment.yaml
   - service.yaml

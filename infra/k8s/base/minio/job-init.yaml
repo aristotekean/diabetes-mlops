@@ -50,8 +50,11 @@ spec:
                 echo "waiting for minio ($attempt/40)..."
                 sleep 3
               done
-              mc mb --ignore-existing local/mlflow
-              echo "bucket ready: mlflow"
+              mc mb --ignore-existing "local/$MLFLOW_ARTIFACTS_BUCKET"
+              echo "bucket ready: $MLFLOW_ARTIFACTS_BUCKET"
           envFrom:
             - secretRef:
                 name: minio-credentials
+            # MLFLOW_ARTIFACTS_BUCKET, from .env.
+            - configMapRef:
+                name: mlflow-server-env

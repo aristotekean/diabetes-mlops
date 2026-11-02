@@ -181,6 +181,11 @@ Además se exportan los colectores por defecto (`process_*` en Linux,
 
 ## Configuración
 
+La API lee su configuración del entorno. En compose y en Kubernetes los valores
+salen del `.env` de la raíz del repositorio (`MLFLOW_*`, `MODEL_*`,
+`TRAIN_DB_*`; ver [`.env.example`](../../.env.example)); las demás variables de
+la tabla toman su valor por defecto.
+
 | Variable | Por defecto | Descripción |
 | -------- | ----------- | ----------- |
 | `MLFLOW_TRACKING_URI` | — | Servidor MLflow (el cliente también la lee de forma nativa). |

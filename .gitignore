@@ -62,3 +62,6 @@ odd/
 
 # api-inference on-disk spool (inference.logs rows written while Postgres is down)
 apps/api-inference/spool/
+
+# Kubernetes configuration rendered from .env (holds credentials)
+infra/k8s/generated/

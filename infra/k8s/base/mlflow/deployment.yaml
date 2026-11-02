@@ -63,18 +63,21 @@ spec:
               # waiting (server down vs. bucket missing) is visible in the logs.
               attempt=0
               until mc alias set local http://minio:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null \
-                && mc ls local/mlflow >/dev/null; do
+                && mc ls "local/$MLFLOW_ARTIFACTS_BUCKET" >/dev/null; do
                 attempt=$((attempt + 1))
                 if [ "$attempt" -ge 100 ]; then
-                  echo "bucket mlflow not available after $attempt attempts (job/minio-init), giving up" >&2
+                  echo "bucket $MLFLOW_ARTIFACTS_BUCKET not available after $attempt attempts (job/minio-init), giving up" >&2
                   exit 1
                 fi
-                echo "waiting for minio bucket mlflow, created by job/minio-init ($attempt/100)..."
+                echo "waiting for minio bucket $MLFLOW_ARTIFACTS_BUCKET, created by job/minio-init ($attempt/100)..."
                 sleep 3
               done
           envFrom:
             - secretRef:
                 name: minio-credentials
+            # MLFLOW_ARTIFACTS_BUCKET.
+            - configMapRef:
+                name: mlflow-server-env
           securityContext:
             runAsUser: 65532
             runAsGroup: 65532
@@ -108,7 +111,7 @@ spec:
                 --host 0.0.0.0 \
                 --port 5000 \
                 --backend-store-uri "postgresql+psycopg2://${MLFLOW_DB_USER}:${MLFLOW_DB_PASSWORD}@mlflow-db:5432/${MLFLOW_DB_NAME}" \
-                --artifacts-destination s3://mlflow \
+                --artifacts-destination "s3://${MLFLOW_ARTIFACTS_BUCKET}" \
                 --serve-artifacts \
                 --allowed-hosts "localhost:*,127.0.0.1:*,mlflow:*,mlflow.${POD_NAMESPACE}:*,mlflow.${POD_NAMESPACE}.svc:*,mlflow.${POD_NAMESPACE}.svc.cluster.local:*,*.orb.local${MLFLOW_ALLOWED_HOSTS:+,${MLFLOW_ALLOWED_HOSTS}}" \
                 --cors-allowed-origins "http://*.orb.local${MLFLOW_CORS_ALLOWED_ORIGINS:+,${MLFLOW_CORS_ALLOWED_ORIGINS}}"
@@ -119,15 +122,6 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
-            # Optional extra allowed hosts; empty by default. The shell adds the
-            # leading comma only when the value is non-empty. Declared without
-            # `value`: the container still gets an empty variable, and the API
-            # server drops an explicit `value: ""`, which otherwise made every
-            # `kubectl apply` report this Deployment as "configured".
-            - name: MLFLOW_ALLOWED_HOSTS
-            # Optional extra CORS origins for the UI; same empty-by-default
-            # handling as MLFLOW_ALLOWED_HOSTS.
-            - name: MLFLOW_CORS_ALLOWED_ORIGINS
             - name: MLFLOW_DB_USER
               valueFrom:
                 secretKeyRef:
@@ -150,6 +144,11 @@ spec:
             # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY for boto3.
             - secretRef:
                 name: minio-credentials
+            # MLFLOW_ARTIFACTS_BUCKET plus the optional MLFLOW_ALLOWED_HOSTS and
+            # MLFLOW_CORS_ALLOWED_ORIGINS from .env (empty by default; the
+            # shell adds the leading comma only when a value is non-empty).
+            - configMapRef:
+                name: mlflow-server-env
           ports:
             - name: http
               containerPort: 5000
