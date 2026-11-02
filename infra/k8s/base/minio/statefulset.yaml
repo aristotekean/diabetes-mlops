@@ -1,14 +1,19 @@
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: minio
   labels:
     app.kubernetes.io/name: minio
 spec:
   replicas: 1
-  # Single-node MinIO owns its data directory: never run two pods at once.
-  strategy:
-    type: Recreate
+  # Single-node MinIO owns its data directory: a StatefulSet
+  # gives the pod a stable identity (minio-0), its own PVC from
+  # volumeClaimTemplates below (kept across restarts and deletes) and an
+  # update that terminates the old pod before creating the new one, so two
+  # instances never write the same volume. The headless Service names
+  # the pod as minio-0.minio-headless; clients keep using
+  # `minio`.
+  serviceName: minio-headless
   selector:
     matchLabels:
       app.kubernetes.io/name: minio
@@ -43,6 +48,15 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
+          # Single-node store for MLflow artifacts; the 1Gi ceiling covers MinIO's
+          # own caches on this stack's volumes.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 1Gi
           # compose uses `mc ready local`; here the unauthenticated health
           # endpoints are used so the kubelet probes over HTTP (no exec
           # needed). /ready answers 200 only once the server can serve
@@ -62,7 +76,15 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 10
-      volumes:
-        - name: data
-          persistentVolumeClaim:
-            claimName: minio-data
+  # One PVC per pod, named data-minio-0; no storageClassName: the
+  # cluster default is used (OrbStack: `local-path`, bound when the pod is
+  # scheduled). The PVC outlives the pod and the StatefulSet.
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 5Gi

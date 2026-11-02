@@ -11,8 +11,17 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 resources:
-  - pvc.yaml
-  - deployment.yaml
+  - statefulset.yaml
   - service.yaml
+  - service-headless.yaml
   - migrations-configmap.yaml
   - job-migrate.yaml
+
+# Non-sensitive configuration of the database container (the credentials
+# stay in the Secret above). initdb refuses a non-empty directory and some
+# provisioners drop a `lost+found` at the mount root, so the cluster lives one
+# level below the mount point.
+configMapGenerator:
+  - name: postgres-train-env
+    literals:
+      - PGDATA=/var/lib/postgresql/data/pgdata

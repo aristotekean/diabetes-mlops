@@ -81,6 +81,15 @@ spec:
           securityContext:
             runAsUser: 999
             runAsGroup: 999
+          # Shell loop around pg_isready: negligible footprint, bounded so a stuck
+          # wait cannot grow.
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
         # `airflow db check-migrations` polls the alembic revision until it is
         # the latest one, i.e. until job/airflow-init has migrated the schema,
         # and exits non-zero after 300 s. It is the only gate that matters: a
@@ -94,6 +103,15 @@ spec:
                 name: airflow-env
             - secretRef:
                 name: airflow-secrets
+          # `airflow db check-migrations` imports the whole Airflow package, so
+          # it needs the memory of a short-lived Airflow process.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 768Mi
       containers:
         # Web UI, REST API and the execution API the task runners call back.
         # /api/v2/monitor/health answers 200 as soon as the server is up and

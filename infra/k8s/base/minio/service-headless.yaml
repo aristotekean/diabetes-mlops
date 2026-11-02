@@ -1,0 +1,20 @@
+# Headless Service required by the minio StatefulSet (spec.serviceName):
+# it gives the pod the stable DNS name minio-0.minio-headless. Clients
+# keep using the regular `minio` Service in service.yaml.
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio-headless
+  labels:
+    app.kubernetes.io/name: minio
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: minio
+  ports:
+    - name: s3
+      port: 9000
+      targetPort: s3
+    - name: console
+      port: 9001
+      targetPort: console

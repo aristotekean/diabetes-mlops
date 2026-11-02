@@ -84,6 +84,53 @@ Los tres servidores se conectan por una red Tailscale. En OrbStack todo Server A
 | Prometheus (S8) · Grafana (S9) | <http://localhost:9090> · <http://localhost:3000> | Grafana `admin` / `admin` | `infra/monitoring`, perfil `monitoring` de compose (independiente en Server C) |
 | Locust (Server B) | <http://localhost:8089> | — | `infra/load-testing`, perfil `loadtest` de compose |
 
+## Infraestructura en Kubernetes
+
+Todo Server A se despliega con `kubectl apply -k infra/k8s` en el namespace `diabetes`. Cada componente tiene su carpeta en `infra/k8s/base/<componente>` con el workload, su Service y, cuando aplica, PVC y Jobs; los ConfigMaps y Secrets se generan desde `.env` con `infra/k8s/scripts/render-env.sh`, que también fija la imagen `DOCKERHUB_USER/<imagen>:IMAGE_TAG` de los tres componentes propios.
+
+```mermaid
+flowchart TB
+    env[".env"] -->|render-env.sh| gen["infra/k8s/generated<br/>ConfigMaps · Secrets · images"]
+
+    subgraph ns["namespace diabetes"]
+        ing["Ingress nginx<br/>*.k8s.orb.local"]
+        ing --> svcfe["svc frontend"] --> fe["Deployment frontend<br/>1 pod · Streamlit"]
+        ing --> svcapi["svc api-inference"] --> api["Deployment api-inference<br/>HPA 1-20 pods · FastAPI"]
+        ing --> svcml["svc mlflow"] --> ml["Deployment mlflow<br/>1 pod · tracking + registry"]
+        ing --> svcaf["svc airflow-apiserver"] --> af["Deployment airflow<br/>1 pod · api-server, scheduler,<br/>dag-processor, triggerer"]
+
+        api --> svcpt["svc postgres-train"] --> pt[("StatefulSet postgres-train<br/>PVC data-postgres-train-0 · 2Gi")]
+        af --> svcpt
+        af --> svcafdb["svc airflow-db"] --> afdb[("StatefulSet airflow-db<br/>PVC data-airflow-db-0 · 2Gi")]
+        ml --> svcmldb["svc mlflow-db"] --> mldb[("StatefulSet mlflow-db<br/>PVC data-mlflow-db-0 · 2Gi")]
+        ml --> svcminio["svc minio"] --> minio[("StatefulSet minio<br/>PVC data-minio-0 · 5Gi")]
+        api & af -->|"models:/ · runs"| svcml
+        af --- pvcaf[("PVC airflow-dataset · 1Gi")]
+
+        jmig["Job train-db-migrate<br/>ConfigMap train-db-migrations"] --> svcpt
+        jminio["Job minio-init<br/>bucket mlflow"] --> svcminio
+        jaf["Job airflow-init<br/>migraciones + admin"] --> svcafdb
+    end
+
+    gen -.->|envFrom| fe & api & ml & af & pt & afdb & mldb & minio
+    hub[("Docker Hub<br/>aristotekean/diabetes-*")] -.->|pull| fe & api & af
+```
+
+Las bases de datos y MinIO son `StatefulSet` con una réplica: el pod tiene identidad estable (`postgres-train-0`), su PVC sale de `volumeClaimTemplates` y sobrevive al pod, y una actualización termina el pod viejo antes de crear el nuevo, así nunca hay dos instancias escribiendo el mismo volumen. Cada uno tiene además un Service headless (`<nombre>-headless`) que exige el StatefulSet; los clientes siguen usando el Service normal. Los componentes sin estado son `Deployment`; la API escala con un HPA y su spool de logs de inferencia vive en un `emptyDir` para poder correr varias réplicas.
+
+| Componente | Workload | ConfigMap | Secret | Persistencia | Probes | requests → limits |
+|------------|----------|-----------|--------|--------------|--------|-------------------|
+| `mlflow-db` | StatefulSet | `mlflow-db-env` | `mlflow-db-credentials` | `data-mlflow-db-0` (2Gi) | readiness, liveness (`pg_isready`) | 100m/256Mi → 500m/512Mi |
+| `airflow-db` | StatefulSet | `airflow-db-env` | `airflow-db-credentials` | `data-airflow-db-0` (2Gi) | readiness, liveness (`pg_isready`) | 100m/256Mi → 500m/512Mi |
+| `postgres-train` | StatefulSet + Job `train-db-migrate` | `postgres-train-env`, `train-db-migrations` | `postgres-train-credentials` | `data-postgres-train-0` (2Gi) | readiness, liveness (`pg_isready`) | 100m/256Mi → 500m/512Mi |
+| `minio` | StatefulSet + Job `minio-init` | `minio-env` | `minio-credentials` | `data-minio-0` (5Gi) | readiness, liveness (`/minio/health/*`) | 100m/256Mi → 500m/1Gi |
+| `mlflow` | Deployment | `mlflow-server-env`, `mlflow-client-env` | `mlflow-db-credentials`, `minio-credentials` | sin estado (Postgres + MinIO) | startup, readiness, liveness (`/health`) | 250m/512Mi → 1/1Gi |
+| `api-inference` | Deployment + HPA | `api-inference-env`, `mlflow-client-env` | `postgres-train-credentials`, `minio-credentials` | `emptyDir` spool (256Mi) | startup, readiness, liveness (`/health`) | 250m/512Mi → 1/1Gi |
+| `frontend` | Deployment | `frontend-env` | ninguno (no maneja credenciales) | sin estado | startup, readiness, liveness | 100m/256Mi → 500m/512Mi |
+| `airflow` | Deployment + Job `airflow-init` | `airflow-env`, `mlflow-client-env` | `airflow-secrets`, `airflow-db-credentials`, `airflow-admin-user`, `minio-credentials`, `postgres-train-credentials` | `airflow-dataset` (1Gi) | api-server: startup, readiness, liveness; scheduler, dag-processor y triggerer: liveness | api-server 250m/512Mi → 500m/1Gi · scheduler 500m/1Gi → 1/2Gi · dag-processor 150m/256Mi → 250m/768Mi · triggerer 100m/256Mi → 250m/768Mi |
+
+Los init containers de espera (`pg_isready`, `mc`) y los Jobs también declaran `requests` y `limits`; `bash infra/k8s/scripts/check.sh` renderiza `.env` y valida que el kustomize construya antes de commitear.
+
 ## Datos en PostgreSQL
 
 `infra/database/migrations` crea tres esquemas en `postgres-train`. En Kubernetes los aplica el Job `train-db-migrate` (ConfigMap generado con `infra/k8s/scripts/render-migrations.sh`); en compose, el servicio del mismo nombre.
@@ -176,6 +223,7 @@ python3 -m venv .venv && .venv/bin/pip install -e ./ml/diabetes_model pytest && 
 | Prueba de carga | `LOCUST_HOST=http://api.k8s.orb.local docker compose --profile loadtest up -d` y abrir `localhost:8089`; `LOCUST_STEP_LOAD=1` busca el punto de degradación por escalones |
 | Observar el autoescalado | `kubectl -n diabetes get hpa api-inference -w` muestra CPU y réplicas en vivo; añade hasta 2 pods cada 30 s y quita 1 por minuto tras 2 minutos de calma |
 | Monitoreo | `docker compose up -d prometheus grafana` levanta solo Prometheus y Grafana (`--profile monitoring up -d` los suma al stack completo); apuntar `prometheus/targets/api-targets.yml` a la API y `prometheus/targets/minio-targets.yml` a MinIO. Grafana abre en el dashboard **Diabetes · Inference API** (tráfico HTTP, latencias, errores, CPU/memoria del pod, MLOps y MinIO) |
+| Actualizar un clúster desplegado con los `Deployment` anteriores de las bases y MinIO | Los `StatefulSet` crean PVC nuevos (`data-<nombre>-0`), así que los datos no migran solos. Tras `kubectl apply -k infra/k8s`, borrar los workloads viejos para que el Service no reparta tráfico entre ambos: `kubectl -n diabetes delete deployment mlflow-db airflow-db postgres-train minio`; los PVC viejos (`mlflow-db-data`, `airflow-db-data`, `postgres-train-data`, `minio-data`) quedan hasta borrarlos a mano. El DAG regenera datos y modelo en la primera corrida |
 | Borrar todo | `kubectl delete -k infra/k8s` (los PVC y sus datos se van con el namespace) |
 
 Locust y el monitoreo están detrás de los perfiles `loadtest` y `monitoring` del compose raíz, así que `docker compose up -d` no los arranca. Para el monitoreo:

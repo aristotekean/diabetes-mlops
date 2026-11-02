@@ -106,6 +106,15 @@ spec:
             runAsNonRoot: true
             runAsUser: 999
             runAsGroup: 999
+          # Shell loop around pg_isready/psql: negligible footprint, bounded so a
+          # stuck wait cannot grow.
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
       containers:
         - name: api
           image: aristotekean/diabetes-api-inference

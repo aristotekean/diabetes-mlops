@@ -1,0 +1,17 @@
+# Headless Service required by the postgres-train StatefulSet (spec.serviceName):
+# it gives the pod the stable DNS name postgres-train-0.postgres-train-headless. Clients
+# keep using the regular `postgres-train` Service in service.yaml.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-train-headless
+  labels:
+    app.kubernetes.io/name: postgres-train
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: postgres-train
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
