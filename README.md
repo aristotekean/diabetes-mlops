@@ -175,7 +175,7 @@ python3 -m venv .venv && .venv/bin/pip install -e ./ml/diabetes_model pytest && 
 | Pausar el reentrenamiento | `kubectl -n diabetes exec deploy/airflow -c scheduler -- airflow dags pause diabetes_incremental_training` (en un portátil conviene tras la primera corrida) |
 | Prueba de carga | `LOCUST_HOST=http://api.k8s.orb.local docker compose --profile loadtest up -d` y abrir `localhost:8089`; `LOCUST_STEP_LOAD=1` busca el punto de degradación por escalones |
 | Observar el autoescalado | `kubectl -n diabetes get hpa api-inference -w` muestra CPU y réplicas en vivo; añade hasta 2 pods cada 30 s y quita 1 por minuto tras 2 minutos de calma |
-| Monitoreo | `docker compose up -d prometheus grafana` levanta solo Prometheus y Grafana (`--profile monitoring up -d` los suma al stack completo); apuntar `prometheus/targets/api-targets.yml` a la API. Grafana abre en el dashboard **Diabetes · Inference API** |
+| Monitoreo | `docker compose up -d prometheus grafana` levanta solo Prometheus y Grafana (`--profile monitoring up -d` los suma al stack completo); apuntar `prometheus/targets/api-targets.yml` a la API y `prometheus/targets/minio-targets.yml` a MinIO. Grafana abre en el dashboard **Diabetes · Inference API** (tráfico HTTP, latencias, errores, CPU/memoria del pod, MLOps y MinIO) |
 | Borrar todo | `kubectl delete -k infra/k8s` (los PVC y sus datos se van con el namespace) |
 
 Locust y el monitoreo están detrás de los perfiles `loadtest` y `monitoring` del compose raíz, así que `docker compose up -d` no los arranca. Para el monitoreo:

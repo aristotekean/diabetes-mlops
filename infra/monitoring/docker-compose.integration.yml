@@ -2,8 +2,9 @@
 #
 # Conecta Prometheus a la red del stack de la API (el compose raíz usa
 # `name: diabetes`, así que su red por defecto es `diabetes_default`). Con esto
-# Prometheus resuelve y scrapea `api-inference:8000/metrics` sin tocar el compose
-# raíz (que es de otro componente).
+# Prometheus resuelve y scrapea `api-inference:8000/metrics` y
+# `minio:9000/minio/v2/metrics/cluster` sin tocar el compose raíz (que es de
+# otro componente).
 #
 # Requisito: el stack de la API debe estar arriba primero (crea la red):
 #   docker compose up -d                     # desde la raíz del repo (API, MLflow, ...)
@@ -28,4 +29,4 @@ services:
   prometheus:
     networks:
       - default    # su propia red (Grafana ⇄ Prometheus)
-      - diabetes   # red de la API (alcanza api-inference:8000)
+      - diabetes   # red de la API (alcanza api-inference:8000 y minio:9000)
