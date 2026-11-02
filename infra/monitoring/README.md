@@ -33,7 +33,6 @@ carpeta). El dashboard usa exactamente estas series:
 | `predictions_total` | Counter | `status` | predicciones por resultado (succeeded / validation_error / model_unavailable / inference_error) |
 | `prediction_duration_seconds` | Histogram | — | latencia de inferencia p50/p95/p99 |
 | `model_reloads_total` | Counter | `result` | recargas de modelo (success / failure) |
-| `model_info` | Gauge | `name`, `version`, `alias` | modelo productivo servido (tabla) |
 | `inference_log_failures_total` | Counter | — | fallos al escribir `inference.logs` |
 
 **Proceso (colectores por defecto de `prometheus_client`)**:
@@ -78,7 +77,7 @@ serie p50/p95/p99; solicitudes por código de estado; por endpoint; nº de error
 y tasa de error (KPI y en el tiempo).
 **Recursos del pod** — CPU y memoria de la API.
 **MLOps** — predicciones por resultado; latencia de predicción p50/p95/p99;
-recargas de modelo; solicitudes en curso; fallos de log; tabla del modelo servido.
+recargas de modelo; solicitudes en curso; fallos de log.
 **MinIO · almacén de artefactos (S3)** — estado · buckets · objetos · datos
 almacenados · capacidad usada · errores S3 (KPIs); solicitudes y errores S3 por
 operación; tráfico recibido/enviado; latencia TTFB p50/p95/p99; CPU y memoria
