@@ -124,15 +124,26 @@ spec:
               # domain and anything appended through
               # MLFLOW_CORS_ALLOWED_ORIGINS (comma-separated, full origins with
               # scheme, e.g. http://192.168.1.50:5000).
+              # --workers: MLflow 3.x starts 4 uvicorn workers by default, each a
+              # separate ~200-300 MiB Python process (spawn, no shared pages), and
+              # on top of that a job-runner process of the same size: that is what
+              # blew through 1Gi and 2Gi limits. Two workers cover this stack's
+              # clients (the API's model refresh and proxied downloads, Airflow's
+              # logging); the job runner (GenAI evaluation jobs) is disabled below.
               exec mlflow server \
                 --host 0.0.0.0 \
                 --port 5000 \
+                --workers 2 \
                 --backend-store-uri "postgresql+psycopg2://${MLFLOW_DB_USER}:${MLFLOW_DB_PASSWORD}@mlflow-db:5432/${MLFLOW_DB_NAME}" \
                 --artifacts-destination "s3://${MLFLOW_ARTIFACTS_BUCKET}" \
                 --serve-artifacts \
                 --allowed-hosts "localhost:*,127.0.0.1:*,mlflow:*,mlflow.${POD_NAMESPACE}:*,mlflow.${POD_NAMESPACE}.svc:*,mlflow.${POD_NAMESPACE}.svc.cluster.local:*,*.orb.local${MLFLOW_ALLOWED_HOSTS:+,${MLFLOW_ALLOWED_HOSTS}}" \
                 --cors-allowed-origins "http://*.orb.local${MLFLOW_CORS_ALLOWED_ORIGINS:+,${MLFLOW_CORS_ALLOWED_ORIGINS}}"
           env:
+            # No GenAI evaluation jobs here: skip the job-runner process (see
+            # the --workers note above).
+            - name: MLFLOW_SERVER_ENABLE_JOB_EXECUTION
+              value: "false"
             # Namespace the pod runs in (downward API), for the Service FQDNs
             # in --allowed-hosts above.
             - name: POD_NAMESPACE
@@ -169,15 +180,17 @@ spec:
           ports:
             - name: http
               containerPort: 5000
-          # The pip install at start and the UI's run searches are the peaks;
-          # the server idles well under the requests.
+          # Measured on OrbStack: ~230 MiB for the main process plus ~220 MiB
+          # per worker, plus the page cache of the pip install at start. With
+          # the default 4 workers and the job runner the container was
+          # OOMKilled at 1Gi and again at 2Gi.
           resources:
             requests:
               cpu: 250m
-              memory: 512Mi
+              memory: 768Mi
             limits:
               cpu: 1
-              memory: 1Gi
+              memory: 2Gi
           # Up to 150 s for the pip install plus MLflow's own boot; liveness
           # and readiness only start once this has passed.
           startupProbe:

@@ -52,6 +52,25 @@ spec:
                 name: api-inference
                 port:
                   name: http
+    # Same API under the Mac's Tailscale MagicDNS name, for load tests run
+    # from another machine of the tailnet (infra/load-testing). OrbStack
+    # publishes the Ingress LoadBalancer on the Mac's localhost:80 only with
+    # `orb config set k8s.expose_services true` (a Kubernetes reset turns it
+    # off; `orb stop` + `orb start` applies it), and the Mac then forwards
+    # that port to the tailnet as raw TCP, so the Host header reaches nginx:
+    # `tailscale serve --bg --tcp=80 tcp://127.0.0.1:80`. Targeting the
+    # LoadBalancer IP (192.168.139.x) from tailscale serve does not work:
+    # tailscaled has no route into OrbStack's virtual network.
+    - host: kevins-macbook-pro.tail6eea58.ts.net
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: api-inference
+                port:
+                  name: http
     - host: mlflow.k8s.orb.local
       http:
         paths:
